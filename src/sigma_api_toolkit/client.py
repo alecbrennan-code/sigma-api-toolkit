@@ -63,6 +63,7 @@ class SigmaAPIClient:
         self,
         workbook_id: str,
         *,
+        page_id: Optional[str] = None,
         tag_name: Optional[str] = None,
         bookmark_id: Optional[str] = None,
     ) -> List[Dict]:
@@ -74,11 +75,14 @@ class SigmaAPIClient:
 
         entries: List[Dict] = []
         next_page: Optional[str] = None
+        path = f"/v2/workbooks/{workbook_id}/elements"
+        if page_id:
+            path = f"/v2/workbooks/{workbook_id}/pages/{page_id}/elements"
         while True:
             page_params = dict(params)
             if next_page:
                 page_params["page"] = next_page
-            payload = self.get(f"/v2/workbooks/{workbook_id}/elements", params=page_params)
+            payload = self.get(path, params=page_params)
             entries.extend(payload.get("entries", []))
             next_page = payload.get("nextPage")
             if not next_page:

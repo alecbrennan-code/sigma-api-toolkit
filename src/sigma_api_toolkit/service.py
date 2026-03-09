@@ -12,6 +12,7 @@ def inspect_workbook(
     client: SigmaAPIClient,
     workbook_id: str,
     *,
+    page_id: Optional[str] = None,
     tag_name: Optional[str] = None,
     bookmark_id: Optional[str] = None,
     include_columns: bool = False,
@@ -19,6 +20,7 @@ def inspect_workbook(
     workbook = client.get_workbook(workbook_id)
     elements = client.list_workbook_elements(
         workbook_id,
+        page_id=page_id,
         tag_name=tag_name,
         bookmark_id=bookmark_id,
     )
@@ -100,4 +102,3 @@ def pick_elements_for_export(
         "Workbook has multiple exportable elements. Re-run with --element-id, "
         "--element-name, or --all-elements."
     )
-

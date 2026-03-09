@@ -69,7 +69,13 @@ SIGMA_CLIENT_SECRET=...
 
 ## CLI usage
 
-The CLI accepts either a raw workbook ID like `6rXhGgU6qBXYotvQfKtIl1` or a full Sigma workbook URL.
+The CLI accepts either:
+
+- a raw Sigma API workbook reference like `6rXhGgU6qBXYotvQfKtIl1`
+- a Sigma workbook URL like `https://app.sigmacomputing.com/flock-safety/workbook/6rXhGgU6qBXYotvQfKtIl1`
+- a title-prefixed Sigma URL like `https://app.sigmacomputing.com/flock-safety/workbook/Account-Scoring-Query-5J9dDvF9eJ2BVBFkWxBI5f?:nodeId=a78KJC6YSe`
+
+If the URL includes `nodeId=...`, the toolkit treats that as the target page/tab ID.
 
 ### 1. Test auth
 
@@ -90,6 +96,8 @@ This prints:
 - workbook path
 - workbook URL
 - exportable element IDs and names
+
+If the input URL includes a `nodeId`, the output is scoped to that page/tab.
 
 If you want column metadata too:
 
@@ -132,6 +140,19 @@ sigma-toolkit export-data \
 
 That will create one file per exportable element.
 
+### 5. Export directly from a shared workbook tab URL
+
+If a teammate sends the exact Sigma URL for a workbook tab, you can pass it directly:
+
+```bash
+sigma-toolkit export-data \
+  --workbook "https://app.sigmacomputing.com/flock-safety/workbook/Account-Scoring-Query-5J9dDvF9eJ2BVBFkWxBI5f?:nodeId=a78KJC6YSe" \
+  --output-file exports/account-scoring-query__mid-market.csv \
+  --overwrite
+```
+
+For CSV and JSON exports, the toolkit resolves the page/tab to its exportable element(s) and exports those data objects rather than trying to export the page itself as a document.
+
 ## Operational pattern for teammates
 
 1. One person shares a Sigma workbook link or workbook ID.
@@ -169,4 +190,3 @@ Official Sigma docs used for this toolkit:
 - [List elements in a workbook](https://help.sigmacomputing.com/reference/listworkbookelements)
 - [Export data from a workbook](https://help.sigmacomputing.com/reference/exportworkbook)
 - [Download an exported file](https://help.sigmacomputing.com/reference/downloadquery)
-

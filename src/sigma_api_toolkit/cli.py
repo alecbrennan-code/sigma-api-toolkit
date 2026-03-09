@@ -10,7 +10,7 @@ from sigma_api_toolkit.config import SigmaConfig
 from sigma_api_toolkit.service import inspect_workbook, pick_elements_for_export
 from sigma_api_toolkit.utils import (
     default_output_path,
-    normalize_workbook_ref,
+    parse_workbook_locator,
     slugify,
     summarize_elements,
 )
@@ -33,6 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Inspect a workbook and list exportable elements",
     )
     inspect_parser.add_argument("--workbook", required=True, help="Workbook ID or Sigma workbook URL")
+    inspect_parser.add_argument("--page-id")
     inspect_parser.add_argument("--include-columns", action="store_true")
     inspect_parser.add_argument("--tag-name")
     inspect_parser.add_argument("--bookmark-id")
@@ -94,10 +95,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _run_inspect(client: SigmaAPIClient, args: argparse.Namespace) -> int:
-    workbook_id = normalize_workbook_ref(args.workbook)
+    workbook_id, inferred_page_id = parse_workbook_locator(args.workbook)
+    page_id = args.page_id or inferred_page_id
     snapshot = inspect_workbook(
         client,
         workbook_id,
+        page_id=page_id,
         tag_name=args.tag_name,
         bookmark_id=args.bookmark_id,
         include_columns=args.include_columns,
@@ -114,6 +117,8 @@ def _run_inspect(client: SigmaAPIClient, args: argparse.Namespace) -> int:
     print(f"Workbook name: {workbook.get('name')}")
     print(f"Workbook path: {workbook.get('path')}")
     print(f"Workbook URL: {workbook.get('url')}")
+    if page_id:
+        print(f"Page ID: {page_id}")
     print(f"Exportable elements: {len(exportable)}")
     for line in summarize_elements(exportable):
         print(line)
@@ -121,11 +126,15 @@ def _run_inspect(client: SigmaAPIClient, args: argparse.Namespace) -> int:
 
 
 def _run_export(client: SigmaAPIClient, args: argparse.Namespace) -> int:
-    workbook_id = normalize_workbook_ref(args.workbook)
+    workbook_id, inferred_page_id = parse_workbook_locator(args.workbook)
+    page_id = args.page_id or inferred_page_id
     format_type = args.format.lower()
 
-    if args.page_id and (args.element_id or args.element_name or args.all_elements):
-        raise ValueError("--page-id cannot be combined with element selection or --all-elements")
+    if page_id and (args.element_id or args.element_name):
+        raise ValueError("--page-id cannot be combined with element selection")
+
+    if page_id and args.all_elements and args.output_file:
+        raise ValueError("--output-file cannot be used together with --all-elements")
 
     if args.output_file and args.all_elements:
         raise ValueError("--output-file cannot be used together with --all-elements")
@@ -134,16 +143,16 @@ def _run_export(client: SigmaAPIClient, args: argparse.Namespace) -> int:
     if not args.disable_chunking and format_type in CHUNKABLE_FORMATS:
         chunk_size = min(args.chunk_size, MAX_EXPORT_ROWS)
 
-    if args.page_id:
+    if page_id and format_type in {"pdf", "png", "xlsx"}:
         workbook = client.get_workbook(workbook_id)
         output_file = Path(args.output_file) if args.output_file else Path(args.output_dir) / (
-            f"{slugify(workbook.get('name', workbook_id))}__page-{args.page_id}.{format_type}"
+            f"{slugify(workbook.get('name', workbook_id))}__page-{page_id}.{format_type}"
         )
         bytes_written = client.export_to_file(
             output_file,
             workbook_id,
             format_type=format_type,
-            page_id=args.page_id,
+            page_id=page_id,
             chunk_size=chunk_size,
             overwrite=args.overwrite,
             poll_seconds=args.poll_seconds,
@@ -158,6 +167,7 @@ def _run_export(client: SigmaAPIClient, args: argparse.Namespace) -> int:
     snapshot = inspect_workbook(
         client,
         workbook_id,
+        page_id=page_id,
         tag_name=args.tag_name,
         bookmark_id=args.bookmark_id,
         include_columns=False,
