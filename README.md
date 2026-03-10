@@ -33,6 +33,9 @@ sigma-api-toolkit/
 ├── README.md
 ├── docs/
 │   └── architecture.md
+├── examples/
+│   ├── account_scoring_mid_market_export.md
+│   └── account_scoring_mid_market_export.py
 ├── pyproject.toml
 ├── src/
 │   └── sigma_api_toolkit/
@@ -153,6 +156,19 @@ sigma-toolkit export-data \
 
 For CSV and JSON exports, the toolkit resolves the page/tab to its exportable element(s) and exports those data objects rather than trying to export the page itself as a document.
 
+### 6. Use the checked-in Account Scoring reference export
+
+The repo includes a concrete reference example for the exact `Account Scoring Query -> Mid Market` export validated in this project:
+
+```bash
+python3 examples/account_scoring_mid_market_export.py \
+  --env-file .env \
+  --output-file exports/account-scoring-query__mid-market.csv \
+  --overwrite
+```
+
+Supporting reference notes live in `examples/account_scoring_mid_market_export.md`.
+
 ## Operational pattern for teammates
 
 1. One person shares a Sigma workbook link or workbook ID.
@@ -176,6 +192,7 @@ This avoids embedding workbook-specific logic in code.
 sigma-toolkit inspect-workbook --workbook <workbook-id-or-url>
 sigma-toolkit export-data --workbook <workbook-id-or-url> --all-elements --overwrite
 sigma-toolkit export-data --workbook <workbook-id-or-url> --element-name "<element name>" --overwrite
+python3 examples/account_scoring_mid_market_export.py --env-file .env --overwrite
 python3 -m unittest discover -s tests
 ```
 
