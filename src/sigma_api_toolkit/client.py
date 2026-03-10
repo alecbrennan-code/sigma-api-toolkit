@@ -155,7 +155,7 @@ class SigmaAPIClient:
                 "GET",
                 f"/v2/query/{query_id}/download",
                 stream=True,
-                allow_retry_statuses={202, 204, 404},
+                allow_retry_statuses={202, 204, 404, 502, 503, 504},
             )
             if response is not None and response.status_code == 200:
                 return response.content
@@ -174,6 +174,7 @@ class SigmaAPIClient:
         element_id: Optional[str] = None,
         page_id: Optional[str] = None,
         chunk_size: Optional[int] = None,
+        start_offset: Optional[int] = None,
         poll_seconds: float = 2.0,
         timeout_seconds: float = 300.0,
         results_validity_time_ms: Optional[int] = None,
@@ -181,8 +182,8 @@ class SigmaAPIClient:
         bookmark_id: Optional[str] = None,
     ) -> Iterator[bytes]:
         if chunk_size and format_type in CHUNKABLE_FORMATS:
-            next_offset: Optional[int] = None
-            next_start_row = 1
+            next_offset: Optional[int] = start_offset
+            next_start_row = start_offset if start_offset is not None else 1
             while True:
                 query_id = self.create_export(
                     workbook_id,
