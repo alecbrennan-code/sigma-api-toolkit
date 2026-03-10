@@ -36,6 +36,8 @@ sigma-api-toolkit/
 ├── examples/
 │   ├── account_scoring_mid_market_export.md
 │   └── account_scoring_mid_market_export.py
+│   ├── deal_performance_and_daily_exports.md
+│   └── export_sigma_tab_url.py
 ├── pyproject.toml
 ├── src/
 │   └── sigma_api_toolkit/
@@ -169,6 +171,25 @@ python3 examples/account_scoring_mid_market_export.py \
 
 Supporting reference notes live in `examples/account_scoring_mid_market_export.md`.
 
+### 7. Use the generic Sigma tab URL export helper
+
+If you want a saved script for a specific Sigma workbook URL, use:
+
+```bash
+python3 examples/export_sigma_tab_url.py \
+  --env-file .env \
+  --workbook-url "https://app.sigmacomputing.com/flock-safety/workbook/...?:nodeId=..." \
+  --output-file exports/example.csv \
+  --overwrite
+```
+
+This script is intentionally generic and handles both cases we saw in practice:
+
+- `nodeId` is a page/tab ID
+- `nodeId` is a direct element/table ID
+
+The exact `deal performance daily` and `deal performance` reference pulls are documented in `examples/deal_performance_and_daily_exports.md`.
+
 ## Operational pattern for teammates
 
 1. One person shares a Sigma workbook link or workbook ID.
@@ -193,6 +214,7 @@ sigma-toolkit inspect-workbook --workbook <workbook-id-or-url>
 sigma-toolkit export-data --workbook <workbook-id-or-url> --all-elements --overwrite
 sigma-toolkit export-data --workbook <workbook-id-or-url> --element-name "<element name>" --overwrite
 python3 examples/account_scoring_mid_market_export.py --env-file .env --overwrite
+python3 examples/export_sigma_tab_url.py --env-file .env --workbook-url "<sigma-url>" --output-file exports/example.csv --overwrite
 python3 -m unittest discover -s tests
 ```
 

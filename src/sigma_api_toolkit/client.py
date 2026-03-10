@@ -59,6 +59,10 @@ class SigmaAPIClient:
     def get_workbook(self, workbook_id: str) -> Dict:
         return self.get(f"/v2/workbooks/{workbook_id}")
 
+    def list_workbook_pages(self, workbook_id: str) -> List[Dict]:
+        payload = self.get(f"/v2/workbooks/{workbook_id}/pages")
+        return payload.get("entries", [])
+
     def list_workbook_elements(
         self,
         workbook_id: str,

@@ -7,7 +7,11 @@ from typing import Sequence
 
 from sigma_api_toolkit.client import CHUNKABLE_FORMATS, MAX_EXPORT_ROWS, SigmaAPIClient, SigmaAPIError
 from sigma_api_toolkit.config import SigmaConfig
-from sigma_api_toolkit.service import inspect_workbook, pick_elements_for_export
+from sigma_api_toolkit.service import (
+    inspect_workbook,
+    pick_elements_for_export,
+    resolve_workbook_node_selection,
+)
 from sigma_api_toolkit.utils import (
     default_output_path,
     parse_workbook_locator,
@@ -95,8 +99,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _run_inspect(client: SigmaAPIClient, args: argparse.Namespace) -> int:
-    workbook_id, inferred_page_id = parse_workbook_locator(args.workbook)
-    page_id = args.page_id or inferred_page_id
+    workbook_id, inferred_node_id = parse_workbook_locator(args.workbook)
+    resolved = resolve_workbook_node_selection(client, workbook_id, inferred_node_id)
+    page_id = args.page_id or resolved["page_id"]
     snapshot = inspect_workbook(
         client,
         workbook_id,
@@ -112,6 +117,12 @@ def _run_inspect(client: SigmaAPIClient, args: argparse.Namespace) -> int:
 
     workbook = snapshot["workbook"]
     exportable = snapshot["exportable_elements"]
+    if resolved["element_id"]:
+        exportable = [
+            element
+            for element in exportable
+            if str(element.get("elementId")) == resolved["element_id"]
+        ]
 
     print(f"Workbook ID: {workbook_id}")
     print(f"Workbook name: {workbook.get('name')}")
@@ -119,6 +130,8 @@ def _run_inspect(client: SigmaAPIClient, args: argparse.Namespace) -> int:
     print(f"Workbook URL: {workbook.get('url')}")
     if page_id:
         print(f"Page ID: {page_id}")
+    if resolved["element_id"]:
+        print(f"Element ID: {resolved['element_id']}")
     print(f"Exportable elements: {len(exportable)}")
     for line in summarize_elements(exportable):
         print(line)
@@ -126,11 +139,13 @@ def _run_inspect(client: SigmaAPIClient, args: argparse.Namespace) -> int:
 
 
 def _run_export(client: SigmaAPIClient, args: argparse.Namespace) -> int:
-    workbook_id, inferred_page_id = parse_workbook_locator(args.workbook)
-    page_id = args.page_id or inferred_page_id
+    workbook_id, inferred_node_id = parse_workbook_locator(args.workbook)
+    resolved = resolve_workbook_node_selection(client, workbook_id, inferred_node_id)
+    page_id = args.page_id or resolved["page_id"]
+    resolved_element_id = resolved["element_id"]
     format_type = args.format.lower()
 
-    if page_id and (args.element_id or args.element_name):
+    if page_id and (args.element_id or args.element_name or resolved_element_id):
         raise ValueError("--page-id cannot be combined with element selection")
 
     if page_id and args.all_elements and args.output_file:
@@ -175,7 +190,7 @@ def _run_export(client: SigmaAPIClient, args: argparse.Namespace) -> int:
     workbook = snapshot["workbook"]
     selected = pick_elements_for_export(
         snapshot["elements"],
-        element_id=args.element_id,
+        element_id=args.element_id or resolved_element_id,
         element_name=args.element_name,
         all_elements=args.all_elements,
     )

@@ -43,6 +43,27 @@ def inspect_workbook(
     }
 
 
+def resolve_workbook_node_selection(
+    client: SigmaAPIClient,
+    workbook_id: str,
+    node_id: Optional[str],
+) -> Dict[str, Optional[str]]:
+    if not node_id:
+        return {"page_id": None, "element_id": None}
+
+    pages = client.list_workbook_pages(workbook_id)
+    for page in pages:
+        if str(page.get("pageId")) == node_id:
+            return {"page_id": node_id, "element_id": None}
+
+    elements = client.list_workbook_elements(workbook_id)
+    for element in elements:
+        if str(element.get("elementId")) == node_id:
+            return {"page_id": None, "element_id": node_id}
+
+    return {"page_id": None, "element_id": None}
+
+
 def exportable_elements(elements: Sequence[Dict]) -> List[Dict]:
     candidates = []
     for element in elements:
