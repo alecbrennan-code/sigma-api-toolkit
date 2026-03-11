@@ -206,6 +206,8 @@ class SigmaAPIClient:
                 if format_type == "csv" and _csv_is_header_only(raw):
                     break
                 yield raw
+                if format_type == "csv" and _csv_data_row_count(raw) < chunk_size:
+                    break
                 next_start_row += chunk_size
                 next_offset = next_start_row
         else:
@@ -317,6 +319,13 @@ class SigmaAPIClient:
 def _csv_is_header_only(raw: bytes) -> bool:
     lines = raw.strip().splitlines()
     return len(lines) <= 1
+
+
+def _csv_data_row_count(raw: bytes) -> int:
+    lines = raw.strip().splitlines()
+    if len(lines) <= 1:
+        return 0
+    return len(lines) - 1
 
 
 def _strip_first_line(raw: bytes) -> bytes:

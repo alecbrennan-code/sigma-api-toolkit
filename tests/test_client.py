@@ -30,6 +30,16 @@ class RecordingSigmaClient(SigmaAPIClient):
         return next(self.downloads)
 
 
+class ShortFinalChunkSigmaClient(RecordingSigmaClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.downloads = iter(
+            [
+                b"col_a\n1\n",
+            ]
+        )
+
+
 class ClientTest(unittest.TestCase):
     def test_chunk_offsets_follow_sigma_docs(self) -> None:
         client = RecordingSigmaClient()
@@ -42,6 +52,19 @@ class ClientTest(unittest.TestCase):
             )
         )
         self.assertEqual(client.offsets, [None, 3, 5])
+
+    def test_short_csv_chunk_stops_without_follow_up_export(self) -> None:
+        client = ShortFinalChunkSigmaClient()
+        chunks = list(
+            client.iter_export_chunks(
+                "workbook_1",
+                format_type="csv",
+                element_id="element_1",
+                chunk_size=2,
+            )
+        )
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(client.offsets, [None])
 
 
 if __name__ == "__main__":

@@ -78,9 +78,9 @@ The CLI accepts either:
 
 - a raw Sigma API workbook reference like `6rXhGgU6qBXYotvQfKtIl1`
 - a Sigma workbook URL like `https://app.sigmacomputing.com/flock-safety/workbook/6rXhGgU6qBXYotvQfKtIl1`
-- a title-prefixed Sigma URL like `https://app.sigmacomputing.com/flock-safety/workbook/Account-Scoring-Query-5J9dDvF9eJ2BVBFkWxBI5f?:nodeId=a78KJC6YSe`
+- a title-prefixed Sigma URL like `https://app.sigmacomputing.com/flock-safety/workbook/Account-Scoring-Query-5J9dDvF9eJ2BVBFkWxBI5f?:nodeId=BHnQm4BePW`
 
-If the URL includes `nodeId=...`, the toolkit treats that as the target page/tab ID.
+If the URL includes `nodeId=...`, the toolkit resolves that as either a page/tab ID or a direct element ID.
 
 ### 1. Test auth
 
@@ -151,8 +151,9 @@ If a teammate sends the exact Sigma URL for a workbook tab, you can pass it dire
 
 ```bash
 sigma-toolkit export-data \
-  --workbook "https://app.sigmacomputing.com/flock-safety/workbook/Account-Scoring-Query-5J9dDvF9eJ2BVBFkWxBI5f?:nodeId=a78KJC6YSe" \
+  --workbook "https://app.sigmacomputing.com/flock-safety/workbook/Account-Scoring-Query-5J9dDvF9eJ2BVBFkWxBI5f?:nodeId=BHnQm4BePW" \
   --output-file exports/account-scoring-query__mid-market.csv \
+  --chunk-size 500000 \
   --overwrite
 ```
 
@@ -166,6 +167,8 @@ The repo includes a concrete reference example for the exact `Account Scoring Qu
 python3 examples/account_scoring_mid_market_export.py \
   --env-file .env \
   --output-file exports/account-scoring-query__mid-market.csv \
+  --chunk-size 500000 \
+  --request-timeout-seconds 600 \
   --overwrite
 ```
 
@@ -199,6 +202,15 @@ The exact `deal performance daily` and `deal performance` reference pulls are do
    - `--all-elements` if the goal is “pull the workbook’s data locally”.
 
 This avoids embedding workbook-specific logic in code.
+
+## Known exports
+
+If the request is “pull the same thing we exported before,” start with the checked-in references instead of reconstructing the workbook:
+
+- `examples/account_scoring_mid_market_export.py` and `examples/account_scoring_mid_market_export.md`
+- `examples/deal_performance_and_daily_exports.md`
+
+For long-running CSV pulls that fail mid-download, prefer resuming from the next Sigma row offset instead of restarting from zero.
 
 ## Safety and repeatability
 

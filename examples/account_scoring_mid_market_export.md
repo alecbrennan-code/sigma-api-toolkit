@@ -4,10 +4,9 @@ This is a checked-in reference export for the exact Sigma source used during val
 
 ## Source
 
-- Workbook URL: `https://app.sigmacomputing.com/flock-safety/workbook/Account-Scoring-Query-5J9dDvF9eJ2BVBFkWxBI5f?:nodeId=a78KJC6YSe`
+- Workbook URL: `https://app.sigmacomputing.com/flock-safety/workbook/Account-Scoring-Query-5J9dDvF9eJ2BVBFkWxBI5f?:nodeId=BHnQm4BePW`
 - Workbook reference: `5J9dDvF9eJ2BVBFkWxBI5f`
-- Page ID: `a78KJC6YSe`
-- Resolved export element ID: `BHnQm4BePW`
+- Element ID: `BHnQm4BePW`
 
 ## Why this file exists
 
@@ -21,6 +20,8 @@ After installing the toolkit and setting local Sigma credentials:
 python3 examples/account_scoring_mid_market_export.py \
   --env-file .env \
   --output-file exports/account-scoring-query__mid-market.csv \
+  --chunk-size 500000 \
+  --request-timeout-seconds 600 \
   --overwrite
 ```
 
@@ -37,5 +38,6 @@ These outputs are local only. `exports/` is gitignored and should not be committ
 ## Notes
 
 - This example intentionally uses `csv` only.
-- The script resolves the page-specific element automatically from the shared Sigma URL.
+- The script pulls the `Custom SQL` element directly from the shared Sigma URL.
+- If a long export is interrupted, you can resume with `--resume-offset <next_sigma_row_offset>`.
 - This is a reference export pattern, not a requirement that future workbook pulls use the same workbook shape.
