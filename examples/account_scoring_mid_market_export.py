@@ -6,7 +6,14 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sigma_api_toolkit.client import SigmaAPIClient, _strip_first_line
+from sigma_api_toolkit.client import (
+    MAX_RESULTS_VALIDITY_TIME_MS,
+    SigmaAPIClient,
+    SigmaAPIError,
+    _strip_first_line,
+    count_csv_data_records,
+    read_last_csv_data_records,
+)
 from sigma_api_toolkit.config import SigmaConfig
 from sigma_api_toolkit.service import (
     inspect_workbook,
@@ -48,6 +55,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Rows per Sigma export chunk. Default: 500000",
     )
     parser.add_argument(
+        "--chunk-overlap-rows",
+        type=int,
+        default=1_000,
+        help="Rows of CSV overlap to validate between chunk requests. Default: 1000",
+    )
+    parser.add_argument(
         "--request-timeout-seconds",
         type=float,
         default=600.0,
@@ -66,6 +79,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Max wait per chunk before failing. Default: 3600",
     )
     parser.add_argument(
+        "--results-validity-time-ms",
+        type=int,
+        default=MAX_RESULTS_VALIDITY_TIME_MS,
+        help=f"How long Sigma keeps each chunk downloadable. Default: {MAX_RESULTS_VALIDITY_TIME_MS}",
+    )
+    parser.add_argument(
         "--resume-offset",
         type=int,
         default=None,
@@ -75,6 +94,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--overwrite",
         action="store_true",
         help="Replace any existing output/log/summary files.",
+    )
+    parser.add_argument(
+        "--expected-rows",
+        type=int,
+        default=None,
+        help=(
+            "If set, count data rows in the completed CSV and fail if the count "
+            "does not match. Useful as a post-export sanity check against a "
+            "known row count from Sigma."
+        ),
     )
     return parser
 
@@ -144,7 +173,9 @@ def main() -> int:
     log(f"output_path={output_path}")
     log(
         f"workbook_id={workbook_id} node_id={node_id} page_id={page_id} "
-        f"element_id={element_id} resume_offset={args.resume_offset}"
+        f"element_id={element_id} resume_offset={args.resume_offset} "
+        f"chunk_overlap_rows={args.chunk_overlap_rows} "
+        f"results_validity_time_ms={args.results_validity_time_ms}"
     )
 
     snapshot = inspect_workbook(client, workbook_id, page_id=page_id)
@@ -158,15 +189,36 @@ def main() -> int:
     element_id = str(element["elementId"])
     log(f"resolved_element_id={element_id} element_name={element.get('name')}")
 
+    resume_tail_records: list[bytes] = []
+    adjusted_start_offset = args.resume_offset
+    if args.resume_offset is not None:
+        log(f"resume requested at sigma_offset={args.resume_offset}, reading last "
+            f"{args.chunk_overlap_rows} data records from existing file for continuity check")
+        resume_tail_records = read_last_csv_data_records(output_path, args.chunk_overlap_rows)
+        if not resume_tail_records:
+            raise ValueError(
+                f"Cannot validate resume continuity: existing file {output_path} has no data "
+                "rows. Re-run without --resume-offset or supply a file that already contains "
+                "the earlier chunks."
+            )
+        adjusted_start_offset = max(1, args.resume_offset - len(resume_tail_records))
+        log(
+            f"resume_continuity tail_records={len(resume_tail_records)} "
+            f"adjusted_sigma_offset={adjusted_start_offset}"
+        )
+
     try:
         for chunk in client.iter_export_chunks(
             workbook_id,
             format_type="csv",
             element_id=element_id,
             chunk_size=args.chunk_size,
-            start_offset=args.resume_offset,
+            start_offset=adjusted_start_offset,
             poll_seconds=args.poll_seconds,
             timeout_seconds=args.timeout_seconds,
+            results_validity_time_ms=args.results_validity_time_ms,
+            csv_overlap_rows=args.chunk_overlap_rows,
+            csv_resume_tail_records=resume_tail_records or None,
         ):
             chunk_count += 1
             is_first_write = chunk_count == 1 and args.resume_offset is None
@@ -188,6 +240,15 @@ def main() -> int:
             chunk_stats.append(record)
             log("chunk_complete " + " ".join(f"{k}={v}" for k, v in record.items()))
 
+        actual_row_count = count_csv_data_records(output_path)
+        log(f"post_export_row_count rows={actual_row_count}")
+        if args.expected_rows is not None and actual_row_count != args.expected_rows:
+            raise SigmaAPIError(
+                f"Row count mismatch: expected {args.expected_rows} data rows but the "
+                f"completed CSV contains {actual_row_count}. Re-run the Sigma source "
+                "count, confirm ORDER BY is deterministic, or switch to send-export."
+            )
+
         summary = {
             "status": "completed",
             "source_url": SOURCE_URL,
@@ -201,8 +262,12 @@ def main() -> int:
             "duration_seconds": round(
                 (datetime.now(timezone.utc) - start_dt).total_seconds(), 2
             ),
+            "chunk_overlap_rows": args.chunk_overlap_rows,
+            "results_validity_time_ms": args.results_validity_time_ms,
             "chunk_count": chunk_count,
             "total_bytes": total_bytes,
+            "row_count": actual_row_count,
+            "expected_rows": args.expected_rows,
             "chunk_stats": chunk_stats,
         }
     except Exception as exc:
@@ -219,6 +284,8 @@ def main() -> int:
             "duration_seconds": round(
                 (datetime.now(timezone.utc) - start_dt).total_seconds(), 2
             ),
+            "chunk_overlap_rows": args.chunk_overlap_rows,
+            "results_validity_time_ms": args.results_validity_time_ms,
             "chunk_count": chunk_count,
             "total_bytes": total_bytes,
             "chunk_stats": chunk_stats,

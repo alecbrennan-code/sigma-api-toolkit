@@ -1,9 +1,9 @@
 # AGENTS.md — Sigma API Toolkit
 
-Instructions in this file apply to all work in this repository.
+Instructions in this file apply to all work in this repository. They are intentionally agent-agnostic: `CLAUDE.md` is a symlink to this file so Claude Code, Codex, and any other coding agent read the same source of truth.
 
 ## Purpose
-- This repo exists so a teammate or another Codex session can go from a Sigma workbook URL or workbook ID to a repeatable local export.
+- This repo exists so a teammate or another coding-agent session can go from a Sigma workbook URL or workbook ID to a repeatable local export.
 - Prefer reusing the package CLI and checked-in example scripts over writing one-off export code from scratch.
 
 ## First Reads
@@ -21,6 +21,15 @@ Instructions in this file apply to all work in this repository.
 - Use `sigma-toolkit inspect-workbook` or `examples/export_sigma_tab_url.py` to resolve workbook URLs before adding custom code.
 - If a known export already has a dedicated example script, update that script and its companion `.md` instead of creating a second overlapping variant.
 - If an export is interrupted, prefer resume-capable flows instead of restarting from zero when practical.
+
+## Choosing a delivery mode
+- For pulls expected to stay under ~1M rows, direct `/export` via `sigma-toolkit export-data` or an example script is fine.
+- For pulls that exceed 1M rows OR that must be exact, prefer `sigma-toolkit send-export` with a cloud-storage target (e.g., S3). Direct `/export` pagination can overlap across requests when the underlying query lacks a deterministic `ORDER BY`, and the toolkit's client-side overlap validation will fail loudly rather than silently writing a mismatched CSV. `send-export` avoids that entire class of issue by letting Sigma write one stable export to a destination.
+- If you must stay on direct `/export` for a large pull, keep `--chunk-overlap-rows` non-zero so the toolkit can byte-match each chunk boundary.
+
+## Resume and row-count safety
+- The example script `examples/account_scoring_mid_market_export.py` supports `--resume-offset <sigma_row>`. On resume, the script reads the tail of the existing CSV, backs up the Sigma offset by `--chunk-overlap-rows`, and has `iter_export_chunks` byte-validate that the resumed rows connect cleanly to what's already on disk. If the validation fails, the export stops instead of corrupting the file.
+- Both the account-scoring script and any new pulls should prefer passing `--expected-rows N` when the source row count is known. The script counts data records in the completed CSV and fails on mismatch. Use the same pattern in new scripts by importing `count_csv_data_records` from `sigma_api_toolkit.client`.
 
 ## Known Account Scoring Pull
 - The current `Account Scoring Query -> Mid Market` reference pull is the direct element URL:

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections import deque
 import time
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Optional
+from typing import BinaryIO, Deque, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import requests
 
@@ -11,6 +12,7 @@ from sigma_api_toolkit.config import SigmaConfig
 
 MAX_EXPORT_ROWS = 1_000_000
 CHUNKABLE_FORMATS = {"csv", "json", "xlsx"}
+MAX_RESULTS_VALIDITY_TIME_MS = 21_600_000
 
 
 class SigmaAPIError(RuntimeError):
@@ -142,6 +144,9 @@ class SigmaAPIClient:
             raise SigmaAPIError("Sigma export response did not include queryId.")
         return query_id
 
+    def send_export(self, workbook_id: str, *, request_body: Dict) -> Dict:
+        return self.post(f"/v2/workbooks/{workbook_id}/send", json=request_body)
+
     def wait_for_download(
         self,
         query_id: str,
@@ -178,12 +183,23 @@ class SigmaAPIClient:
         poll_seconds: float = 2.0,
         timeout_seconds: float = 300.0,
         results_validity_time_ms: Optional[int] = None,
+        csv_overlap_rows: int = 0,
+        csv_resume_tail_records: Optional[Sequence[bytes]] = None,
         tag_name: Optional[str] = None,
         bookmark_id: Optional[str] = None,
     ) -> Iterator[bytes]:
         if chunk_size and format_type in CHUNKABLE_FORMATS:
+            if format_type == "csv" and csv_overlap_rows >= chunk_size:
+                raise ValueError("--chunk-overlap-rows must be smaller than the chunk size")
+
+            if results_validity_time_ms is None:
+                results_validity_time_ms = MAX_RESULTS_VALIDITY_TIME_MS
+
             next_offset: Optional[int] = start_offset
             next_start_row = start_offset if start_offset is not None else 1
+            previous_tail_records: List[bytes] = (
+                list(csv_resume_tail_records) if csv_resume_tail_records else []
+            )
             while True:
                 query_id = self.create_export(
                     workbook_id,
@@ -205,10 +221,40 @@ class SigmaAPIClient:
                     break
                 if format_type == "csv" and _csv_is_header_only(raw):
                     break
+
+                original_row_count = _csv_data_row_count(raw) if format_type == "csv" else None
+                if format_type == "csv" and csv_overlap_rows and previous_tail_records:
+                    actual_overlap_rows = min(
+                        csv_overlap_rows,
+                        len(previous_tail_records),
+                        original_row_count or 0,
+                    )
+                    expected_overlap = previous_tail_records[-actual_overlap_rows:]
+                    observed_overlap = _csv_first_data_records(raw, actual_overlap_rows)
+                    if expected_overlap != observed_overlap:
+                        current_offset = next_offset if next_offset is not None else 1
+                        raise SigmaAPIError(
+                            "CSV chunk boundary validation failed. "
+                            f"Expected the next chunk at offset={current_offset} to begin with "
+                            f"{actual_overlap_rows} repeated rows from the prior chunk, but Sigma "
+                            "returned a different boundary. This usually means offset-based chunking "
+                            "is walking an unstable row order. Add a deterministic ORDER BY to the "
+                            "source query, export smaller filtered slices so the download does not "
+                            "need chunking, or switch to the toolkit's send-export flow so Sigma can "
+                            "deliver one stable export to a destination without client-side chunking."
+                        )
+                    raw = _drop_first_data_records_preserve_header(raw, actual_overlap_rows)
+                    if _csv_is_header_only(raw):
+                        break
+
                 yield raw
-                if format_type == "csv" and _csv_data_row_count(raw) < chunk_size:
+                if format_type == "csv" and (original_row_count or 0) < chunk_size:
                     break
-                next_start_row += chunk_size
+                if format_type == "csv" and csv_overlap_rows:
+                    previous_tail_records = _csv_last_data_records(raw, csv_overlap_rows)
+                    next_start_row += chunk_size - csv_overlap_rows
+                else:
+                    next_start_row += chunk_size
                 next_offset = next_start_row
         else:
             query_id = self.create_export(
@@ -239,6 +285,7 @@ class SigmaAPIClient:
         poll_seconds: float = 2.0,
         timeout_seconds: float = 300.0,
         results_validity_time_ms: Optional[int] = None,
+        csv_overlap_rows: int = 0,
         tag_name: Optional[str] = None,
         bookmark_id: Optional[str] = None,
     ) -> int:
@@ -259,6 +306,7 @@ class SigmaAPIClient:
             poll_seconds=poll_seconds,
             timeout_seconds=timeout_seconds,
             results_validity_time_ms=results_validity_time_ms,
+            csv_overlap_rows=csv_overlap_rows,
             tag_name=tag_name,
             bookmark_id=bookmark_id,
         ):
@@ -317,19 +365,204 @@ class SigmaAPIClient:
 
 
 def _csv_is_header_only(raw: bytes) -> bool:
-    lines = raw.strip().splitlines()
-    return len(lines) <= 1
+    return _csv_record_count(raw) <= 1
 
 
 def _csv_data_row_count(raw: bytes) -> int:
-    lines = raw.strip().splitlines()
-    if len(lines) <= 1:
-        return 0
-    return len(lines) - 1
+    return max(_csv_record_count(raw) - 1, 0)
 
 
 def _strip_first_line(raw: bytes) -> bytes:
-    newline_index = raw.find(b"\n")
-    if newline_index == -1:
-        return b""
-    return raw[newline_index + 1 :]
+    return _drop_first_csv_records(raw, 1)
+
+
+def _csv_record_count(raw: bytes) -> int:
+    return sum(1 for _ in _iter_csv_record_spans(raw))
+
+
+def _csv_first_data_records(raw: bytes, count: int) -> List[bytes]:
+    if count <= 0:
+        return []
+
+    records: List[bytes] = []
+    for index, (start, end) in enumerate(_iter_csv_record_spans(raw)):
+        if index == 0:
+            continue
+        records.append(raw[start:end])
+        if len(records) >= count:
+            break
+    return records
+
+
+def _csv_last_data_records(raw: bytes, count: int) -> List[bytes]:
+    if count <= 0:
+        return []
+
+    tail: Deque[bytes] = deque(maxlen=count)
+    for index, (start, end) in enumerate(_iter_csv_record_spans(raw)):
+        if index == 0:
+            continue
+        tail.append(raw[start:end])
+    return list(tail)
+
+
+def _drop_first_data_records_preserve_header(raw: bytes, count: int) -> bytes:
+    if count <= 0:
+        return raw
+
+    spans = list(_iter_csv_record_spans(raw))
+    if not spans:
+        return raw
+
+    header_start, header_end = spans[0]
+    kept_start = header_end
+    data_spans = spans[1:]
+    if not data_spans:
+        return raw[header_start:header_end]
+
+    if count >= len(data_spans):
+        return raw[header_start:header_end]
+
+    kept_start = data_spans[count][0]
+    return raw[header_start:header_end] + raw[kept_start:]
+
+
+def _drop_first_csv_records(raw: bytes, count: int) -> bytes:
+    if count <= 0:
+        return raw
+
+    seen = 0
+    for _, end in _iter_csv_record_spans(raw):
+        seen += 1
+        if seen == count:
+            return raw[end:]
+    return b""
+
+
+def _iter_csv_record_spans(raw: bytes) -> Iterator[Tuple[int, int]]:
+    start = 0
+    index = 0
+    in_quotes = False
+
+    while index < len(raw):
+        current = raw[index]
+        if current == 34:
+            if in_quotes and index + 1 < len(raw) and raw[index + 1] == 34:
+                index += 2
+                continue
+            in_quotes = not in_quotes
+        elif current == 10 and not in_quotes:
+            yield (start, index + 1)
+            start = index + 1
+        index += 1
+
+    if start < len(raw):
+        yield (start, len(raw))
+
+
+class _CsvRecordStream:
+    """Stateful CSV parser that yields complete records as bytes arrive.
+
+    Tracks quote state across `feed` calls so records with embedded newlines
+    still parse correctly when the file is streamed in chunks.
+    """
+
+    def __init__(self) -> None:
+        self._buffer = bytearray()
+        self._scan_index = 0
+        self._record_start = 0
+        self._in_quotes = False
+
+    def feed(self, data: bytes) -> Iterator[bytes]:
+        self._buffer.extend(data)
+        while self._scan_index < len(self._buffer):
+            byte = self._buffer[self._scan_index]
+            if byte == 34:
+                if (
+                    self._in_quotes
+                    and self._scan_index + 1 < len(self._buffer)
+                    and self._buffer[self._scan_index + 1] == 34
+                ):
+                    self._scan_index += 2
+                    continue
+                self._in_quotes = not self._in_quotes
+            elif byte == 10 and not self._in_quotes:
+                end = self._scan_index + 1
+                record = bytes(self._buffer[self._record_start:end])
+                self._scan_index = end
+                self._record_start = end
+                yield record
+                continue
+            self._scan_index += 1
+
+        if self._record_start > 0:
+            del self._buffer[:self._record_start]
+            self._scan_index -= self._record_start
+            self._record_start = 0
+
+    def flush(self) -> Optional[bytes]:
+        if self._record_start < len(self._buffer):
+            record = bytes(self._buffer[self._record_start:])
+            self._record_start = len(self._buffer)
+            return record
+        return None
+
+
+def count_csv_data_records(path: Path, *, read_chunk_bytes: int = 1 << 20) -> int:
+    """Return the number of data records (header excluded) in a CSV file.
+
+    Streams the file and respects quoted embedded newlines so the count
+    matches what a CSV parser would report.
+    """
+    stream = _CsvRecordStream()
+    total = 0
+    with path.open("rb") as handle:
+        while True:
+            block = handle.read(read_chunk_bytes)
+            if not block:
+                break
+            for _ in stream.feed(block):
+                total += 1
+    if stream.flush() is not None:
+        total += 1
+    return max(total - 1, 0)
+
+
+def read_last_csv_data_records(
+    path: Path,
+    count: int,
+    *,
+    read_chunk_bytes: int = 1 << 20,
+) -> List[bytes]:
+    """Return the last `count` data records (header excluded) from a CSV file.
+
+    Streams the file so memory usage stays proportional to `count` plus one
+    read buffer, which lets this safely read the tail of a multi-GB export.
+    Records are returned byte-exact so they can be compared against the head
+    of a resumed Sigma chunk.
+    """
+    if count <= 0:
+        return []
+
+    tail: Deque[bytes] = deque(maxlen=count)
+    stream = _CsvRecordStream()
+    header_seen = False
+    with path.open("rb") as handle:
+        while True:
+            block = handle.read(read_chunk_bytes)
+            if not block:
+                break
+            for record in stream.feed(block):
+                if not header_seen:
+                    header_seen = True
+                    continue
+                tail.append(record)
+
+    remainder = stream.flush()
+    if remainder is not None:
+        if not header_seen:
+            header_seen = True
+        else:
+            tail.append(remainder)
+
+    return list(tail)

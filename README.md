@@ -7,6 +7,7 @@ This repo is intentionally separate from any one-off script. It gives you a smal
 1. Load Sigma API credentials from local environment variables.
 2. Inspect a workbook and list its elements from just a workbook ID or Sigma URL.
 3. Export one element, one page, or all exportable elements in a repeatable way.
+4. Trigger Sigma's `/send` export flow when you need Sigma to deliver a stable export to a destination without client-side chunk stitching.
 
 ## What problem this solves
 
@@ -21,9 +22,10 @@ The most reliable pattern is:
 1. Start with the workbook ID or Sigma workbook URL.
 2. Call the workbook metadata endpoint.
 3. Call the workbook elements endpoint.
-4. Either:
+4. Then either:
    - export a specific element to CSV/JSON, or
    - export all exportable elements into separate files.
+5. For large exports that exceed Sigma's direct-download limits, use `send-export` so Sigma writes one stable export to a destination such as cloud storage.
 
 ## Repo structure
 
@@ -154,12 +156,49 @@ sigma-toolkit export-data \
   --workbook "https://app.sigmacomputing.com/flock-safety/workbook/Account-Scoring-Query-5J9dDvF9eJ2BVBFkWxBI5f?:nodeId=BHnQm4BePW" \
   --output-file exports/account-scoring-query__mid-market.csv \
   --chunk-size 500000 \
+  --chunk-overlap-rows 1000 \
   --overwrite
 ```
 
 For CSV and JSON exports, the toolkit resolves the page/tab to its exportable element(s) and exports those data objects rather than trying to export the page itself as a document.
 
-### 6. Use the checked-in Account Scoring reference export
+For chunked CSV exports, the toolkit now re-requests an overlapping boundary between chunks and validates that the rows match exactly before appending. If Sigma returns a different boundary, the export fails loudly instead of silently writing a mismatched CSV.
+
+### 6. Use Sigma's send flow for stable large exports
+
+Sigma's direct `/export` endpoint tops out at 1 million rows per request and Sigma documents that chunked requests can overlap because the row order is evaluated when each request is made. For large exports that need to be exact, the toolkit now exposes a `send-export` command that builds a `/v2/workbooks/{workbookId}/send` request and lets Sigma deliver one export to a destination.
+
+Start from a target spec JSON file. A warehouse-backed cloud storage target is the most useful option for multi-GB CSV exports:
+
+```json
+{
+  "targets": [
+    {
+      "type": "workbook-cloud-export",
+      "workbookCloudExport": {
+        "connectionType": "snowflake",
+        "authorization": "YOUR_STORAGE_AUTHORIZATION",
+        "uri": "s3://YOUR_BUCKET/sigma/account-scoring.csv",
+        "exportFormat": "csv",
+        "timestampedUri": null
+      }
+    }
+  ]
+}
+```
+
+Save that JSON locally and run:
+
+```bash
+sigma-toolkit send-export \
+  --workbook "https://app.sigmacomputing.com/flock-safety/workbook/Account-Scoring-Query-5J9dDvF9eJ2BVBFkWxBI5f?:nodeId=BHnQm4BePW" \
+  --request-file examples/send_export_workbook_cloud_storage.json.example \
+  --dry-run
+```
+
+The dry run prints the exact `/send` payload with the correct Sigma `elementId` or `pageId` injected into `attachments`. Remove `--dry-run` once the target config matches your org's storage setup.
+
+### 7. Use the checked-in Account Scoring reference export
 
 The repo includes a concrete reference example for the exact `Account Scoring Query -> Mid Market` export validated in this project:
 
@@ -168,13 +207,25 @@ python3 examples/account_scoring_mid_market_export.py \
   --env-file .env \
   --output-file exports/account-scoring-query__mid-market.csv \
   --chunk-size 500000 \
+  --chunk-overlap-rows 1000 \
   --request-timeout-seconds 600 \
   --overwrite
 ```
 
 Supporting reference notes live in `examples/account_scoring_mid_market_export.md`.
 
-### 7. Use the generic Sigma tab URL export helper
+If you know the expected row count from the Sigma source, pass `--expected-rows N` so the script counts data rows in the completed CSV and fails loudly on mismatch:
+
+```bash
+python3 examples/account_scoring_mid_market_export.py \
+  --env-file .env \
+  --expected-rows 1450000 \
+  --overwrite
+```
+
+On resume, the script now validates continuity between the existing CSV and the new chunk by byte-matching the last `--chunk-overlap-rows` rows of the file against the head of the resumed Sigma response. A mismatch stops the export instead of appending drift.
+
+### 8. Use the generic Sigma tab URL export helper
 
 If you want a saved script for a specific Sigma workbook URL, use:
 
@@ -212,11 +263,20 @@ If the request is “pull the same thing we exported before,” start with the c
 
 For long-running CSV pulls that fail mid-download, prefer resuming from the next Sigma row offset instead of restarting from zero.
 
+If a chunked CSV export fails with a boundary-validation error, treat that as a data-safety stop rather than a transient transport failure. The usual fixes are:
+
+1. Add a deterministic `order by` to the underlying Sigma SQL or data model element.
+2. Export smaller filtered slices so the result fits in a single Sigma export request.
+3. Switch to `send-export`, ideally with a warehouse-backed cloud storage target, so Sigma delivers one stable export without offset pagination.
+4. Keep chunk overlap enabled so the toolkit can verify chunk continuity when you must stay on direct `/export`.
+
 ## Safety and repeatability
 
 - Secrets are never committed. `.env` is gitignored.
 - Exports fail if the output file already exists, unless `--overwrite` is set.
 - Large CSV/JSON/XLSX exports can be chunked with `rowLimit` and `offset`.
+- Sigma documents that chunked exports can overlap between requests, so the toolkit uses overlap-aware CSV chunk validation by default in the CLI and example scripts.
+- Sigma also supports a `/send` workflow that can deliver an export directly to a destination. This is the preferred path for large exact exports because it avoids client-side stitching entirely.
 - Workbook URLs are accepted directly, so teammates do not need to manually extract IDs.
 
 ## Useful commands
@@ -225,6 +285,7 @@ For long-running CSV pulls that fail mid-download, prefer resuming from the next
 sigma-toolkit inspect-workbook --workbook <workbook-id-or-url>
 sigma-toolkit export-data --workbook <workbook-id-or-url> --all-elements --overwrite
 sigma-toolkit export-data --workbook <workbook-id-or-url> --element-name "<element name>" --overwrite
+sigma-toolkit send-export --workbook <workbook-id-or-url> --request-file <targets.json> --dry-run
 python3 examples/account_scoring_mid_market_export.py --env-file .env --overwrite
 python3 examples/export_sigma_tab_url.py --env-file .env --workbook-url "<sigma-url>" --output-file exports/example.csv --overwrite
 python3 -m unittest discover -s tests
@@ -238,6 +299,9 @@ Official Sigma docs used for this toolkit:
 
 - [Get access token](https://help.sigmacomputing.com/reference/posttoken)
 - [Get a workbook](https://help.sigmacomputing.com/reference/getworkbook)
+- [Export data from a workbook](https://help.sigmacomputing.com/reference/exportworkbook)
 - [List elements in a workbook](https://help.sigmacomputing.com/reference/listworkbookelements)
 - [Export data from a workbook](https://help.sigmacomputing.com/reference/exportworkbook)
+- [Export a workbook](https://help.sigmacomputing.com/reference/sendworkbook)
+- [Export to cloud storage](https://help.sigmacomputing.com/docs/export-to-cloud-storage)
 - [Download an exported file](https://help.sigmacomputing.com/reference/downloadquery)
