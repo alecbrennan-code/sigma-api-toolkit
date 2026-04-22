@@ -90,6 +90,15 @@ If the URL includes `nodeId=...`, the toolkit resolves that as either a page/tab
 sigma-toolkit test-auth
 ```
 
+### 1a. List workbook controls (filters)
+
+```bash
+sigma-toolkit list-controls \
+  --workbook "https://app.sigmacomputing.com/flock-safety/workbook/WIP-L1-Cockpit-1TWwiPtRVv4EkG7aBjXFJS"
+```
+
+Prints every control with its name and `valueType`. Sigma does not expose the currently-selected value — this command only lists the control surface so you know which names to pass into `--control`.
+
 ### 2. Inspect a workbook
 
 ```bash
@@ -132,6 +141,26 @@ sigma-toolkit export-data \
   --element-name "Course Properties Parsed" \
   --overwrite
 ```
+
+### 3a. Export with a filter applied (workbook controls)
+
+Sigma's `/export` and `/send` endpoints accept control values server-side, so you can pull a pre-filtered slice without touching the workbook UI:
+
+```bash
+sigma-toolkit export-data \
+  --workbook "<url>" \
+  --element-id 3ouiWRJsEn \
+  --control 'Sales-Team=["Major Markets 1"]' \
+  --control 'Include-Closed=false' \
+  --output-file exports/team-pipe-gen__major-markets-1.csv \
+  --overwrite
+```
+
+- `--control NAME=VALUE` is repeatable. Values that look like JSON (`[`, `{`, `true`, `false`, numbers) are parsed as JSON so array-valued controls like `text-list` work. Plain strings pass through as-is.
+- `--controls-file path.json` takes a JSON object mapping control name to value. Useful for complex values (date ranges) or when you have many controls. `--control` flags win on overlap.
+- `--print-request` resolves the control map and prints it without firing the export. Use this as a dry-run to catch typos in control names before spending a Sigma query.
+
+Run `sigma-toolkit list-controls --workbook "<url>"` first to discover valid control names and their value types.
 
 ### 4. Export every exportable element from a workbook
 

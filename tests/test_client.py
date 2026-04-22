@@ -111,6 +111,22 @@ class SendSigmaClient(SigmaAPIClient):
         return {"status": "accepted"}
 
 
+class ParameterCapturingSigmaClient(SigmaAPIClient):
+    def __init__(self) -> None:
+        super().__init__(
+            SigmaConfig(
+                base_url="https://example.com",
+                client_id="id",
+                client_secret="secret",
+            )
+        )
+        self.captured_payload = None
+
+    def post(self, path: str, json=None, params=None):  # type: ignore[override]
+        self.captured_payload = json
+        return {"queryId": "q1"}
+
+
 class ClientTest(unittest.TestCase):
     def test_chunk_offsets_follow_sigma_docs(self) -> None:
         client = RecordingSigmaClient()
@@ -241,6 +257,28 @@ class ClientTest(unittest.TestCase):
             self.assertEqual(count_csv_data_records(path), 2)
         finally:
             path.unlink()
+
+    def test_create_export_forwards_control_parameters(self) -> None:
+        client = ParameterCapturingSigmaClient()
+        client.create_export(
+            "workbook_1",
+            format_type="csv",
+            element_id="element_1",
+            parameters={"Sales-Team": ["Major Markets 1"], "Include-Closed": True},
+        )
+        self.assertEqual(
+            client.captured_payload["parameters"],
+            {"Sales-Team": ["Major Markets 1"], "Include-Closed": True},
+        )
+
+    def test_create_export_omits_parameters_key_when_empty(self) -> None:
+        client = ParameterCapturingSigmaClient()
+        client.create_export(
+            "workbook_1",
+            format_type="csv",
+            element_id="element_1",
+        )
+        self.assertNotIn("parameters", client.captured_payload)
 
     def test_send_export_posts_to_send_endpoint(self) -> None:
         client = SendSigmaClient()

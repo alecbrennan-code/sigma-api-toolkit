@@ -31,6 +31,66 @@ Instructions in this file apply to all work in this repository. They are intenti
 - The example script `examples/account_scoring_mid_market_export.py` supports `--resume-offset <sigma_row>`. On resume, the script reads the tail of the existing CSV, backs up the Sigma offset by `--chunk-overlap-rows`, and has `iter_export_chunks` byte-validate that the resumed rows connect cleanly to what's already on disk. If the validation fails, the export stops instead of corrupting the file.
 - Both the account-scoring script and any new pulls should prefer passing `--expected-rows N` when the source row count is known. The script counts data records in the completed CSV and fails on mismatch. Use the same pattern in new scripts by importing `count_csv_data_records` from `sigma_api_toolkit.client`.
 
+## Filtered-export playbook
+
+Follow this flow whenever a user gives you a Sigma workbook URL and asks for data filtered by a control value. It works identically under Claude Code, Codex, or any other agent because the only primitives are the `sigma-toolkit` CLI and the user's `.env`.
+
+**Important limitation up front:** Sigma's REST API does NOT expose the currently-selected value of a control. It exposes the control's name and `valueType`, and it accepts a value on export, but you cannot read what's displayed in someone's browser. Do not pretend otherwise. If a user asks "what is this dashboard filtered to right now," the honest answer is to either open the UI or have them tell you.
+
+### Step 1 — confirm auth
+```
+sigma-toolkit test-auth
+```
+If this fails, stop and ask the user to fix `.env`. Do not try to recover by guessing credentials.
+
+### Step 2 — inspect the workbook
+```
+sigma-toolkit inspect-workbook --workbook "<url>"
+```
+Capture:
+- Workbook ID
+- Page ID (if the URL had `nodeId=...` pointing at a page)
+- Exportable element IDs, names, and types
+
+Report these back to the user before moving on. If the `nodeId` resolved to a non-exportable node (e.g., a control element), say so and ask which element to pull.
+
+### Step 3 — list controls
+```
+sigma-toolkit list-controls --workbook "<url>"
+```
+Capture control name and valueType. Report them to the user and state plainly: "I can't see what any of these are currently set to. Tell me which one(s) to apply and what value."
+
+### Step 4 — align on the plan with the user
+State the plan in one message and ask for confirmation before acting. Include:
+- Which element you'll export (by ID and name).
+- Which controls you'll set, and to what values.
+- The export format and expected output path.
+- Whether you'll use direct `/export` or `send-export` (prefer `send-export` for expected row counts >1M).
+
+Wait for the user to confirm. Do not skip this step.
+
+### Step 5 — dry-run the request
+```
+sigma-toolkit export-data --workbook "<url>" --element-id <id> \
+  --control 'Sales-Team=["Major Markets 1"]' \
+  --print-request
+```
+`--print-request` resolves `--control` / `--controls-file` into the final parameters map and prints it without firing the export. Show the output to the user. This catches typos in control names (they are case-sensitive) and wrong value types before you spend a Sigma query.
+
+### Step 6 — execute
+Drop `--print-request` and add `--output-file` + `--overwrite`. For large pulls, use `send-export` with a cloud-storage target instead.
+
+### Step 7 — verify
+Log the output row count. For known expected sizes, pass `--expected-rows N` (supported on the account-scoring example script; add similar logic to new scripts using `count_csv_data_records`). If the filtered row count looks wildly off from what the user expects, surface that before moving on.
+
+### Control value format cheatsheet
+- `text` control: `--control Name='value'`
+- `text-list` control: `--control Name='["value1","value2"]'` (JSON array — single values also work as a string but arrays are safer)
+- `number` / `number-range`: `--control Name=50000` or `--control Name='[100,500]'`
+- `boolean`: `--control Name=true`
+- `date` / `date-range`: use `--controls-file controls.json` with explicit JSON; the date shape varies by control
+- For anything complex or when you have many controls, use `--controls-file path.json` with a JSON object and keep the file gitignored if it holds real values.
+
 ## Known Account Scoring Pull
 - The current `Account Scoring Query -> Mid Market` reference pull is the direct element URL:
   - `https://app.sigmacomputing.com/flock-safety/workbook/Account-Scoring-Query-5J9dDvF9eJ2BVBFkWxBI5f?:nodeId=BHnQm4BePW`

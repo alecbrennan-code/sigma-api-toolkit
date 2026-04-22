@@ -99,6 +99,27 @@ class SigmaAPIClient:
         payload = self.get(f"/v2/workbooks/{workbook_id}/elements/{element_id}/columns")
         return payload.get("entries", payload if isinstance(payload, list) else [])
 
+    def list_workbook_controls(self, workbook_id: str) -> List[Dict]:
+        """Return every control defined on the workbook with its name and valueType.
+
+        Sigma exposes controls as write-only: the response here does not include
+        the currently-selected value. Use this to discover which control names
+        are available so callers can pass them into /export or /send.
+        """
+        entries: List[Dict] = []
+        next_page: Optional[str] = None
+        path = f"/v2/workbooks/{workbook_id}/controls"
+        while True:
+            params: Dict[str, str] = {}
+            if next_page:
+                params["page"] = next_page
+            payload = self.get(path, params=params)
+            entries.extend(payload.get("entries", []))
+            next_page = payload.get("nextPage")
+            if not next_page:
+                break
+        return entries
+
     def get(self, path: str, params: Optional[Dict] = None) -> Dict:
         response = self._request("GET", path, params=params)
         return response.json()
@@ -119,6 +140,7 @@ class SigmaAPIClient:
         results_validity_time_ms: Optional[int] = None,
         tag_name: Optional[str] = None,
         bookmark_id: Optional[str] = None,
+        parameters: Optional[Dict[str, object]] = None,
     ) -> str:
         payload: Dict[str, object] = {"format": {"type": format_type}}
         params: Dict[str, str] = {}
@@ -133,6 +155,8 @@ class SigmaAPIClient:
             payload["offset"] = offset
         if results_validity_time_ms is not None:
             payload["resultsValidityTimeMs"] = results_validity_time_ms
+        if parameters:
+            payload["parameters"] = dict(parameters)
         if tag_name:
             params["tagName"] = tag_name
         if bookmark_id:
@@ -187,6 +211,7 @@ class SigmaAPIClient:
         csv_resume_tail_records: Optional[Sequence[bytes]] = None,
         tag_name: Optional[str] = None,
         bookmark_id: Optional[str] = None,
+        parameters: Optional[Dict[str, object]] = None,
     ) -> Iterator[bytes]:
         if chunk_size and format_type in CHUNKABLE_FORMATS:
             if format_type == "csv" and csv_overlap_rows >= chunk_size:
@@ -211,6 +236,7 @@ class SigmaAPIClient:
                     results_validity_time_ms=results_validity_time_ms,
                     tag_name=tag_name,
                     bookmark_id=bookmark_id,
+                    parameters=parameters,
                 )
                 raw = self.wait_for_download(
                     query_id,
@@ -265,6 +291,7 @@ class SigmaAPIClient:
                 results_validity_time_ms=results_validity_time_ms,
                 tag_name=tag_name,
                 bookmark_id=bookmark_id,
+                parameters=parameters,
             )
             yield self.wait_for_download(
                 query_id,
@@ -288,6 +315,7 @@ class SigmaAPIClient:
         csv_overlap_rows: int = 0,
         tag_name: Optional[str] = None,
         bookmark_id: Optional[str] = None,
+        parameters: Optional[Dict[str, object]] = None,
     ) -> int:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         if output_path.exists() and not overwrite:
@@ -309,6 +337,7 @@ class SigmaAPIClient:
             csv_overlap_rows=csv_overlap_rows,
             tag_name=tag_name,
             bookmark_id=bookmark_id,
+            parameters=parameters,
         ):
             data = chunk
             if format_type == "csv" and not first_chunk:

@@ -1,6 +1,12 @@
 import unittest
 
-from sigma_api_toolkit.utils import normalize_workbook_ref, parse_workbook_locator, slugify
+from sigma_api_toolkit.utils import (
+    normalize_workbook_ref,
+    parse_control_arg,
+    parse_control_args,
+    parse_workbook_locator,
+    slugify,
+)
 
 
 class UtilsTest(unittest.TestCase):
@@ -32,6 +38,37 @@ class UtilsTest(unittest.TestCase):
 
     def test_slugify(self) -> None:
         self.assertEqual(slugify("Course Properties Parsed"), "course-properties-parsed")
+
+    def test_parse_control_arg_plain_string(self) -> None:
+        self.assertEqual(
+            parse_control_arg("Sales-Team=Major Markets 1"),
+            ("Sales-Team", "Major Markets 1"),
+        )
+
+    def test_parse_control_arg_json_array(self) -> None:
+        self.assertEqual(
+            parse_control_arg('Sales-Team=["Major Markets 1","Major Markets 2"]'),
+            ("Sales-Team", ["Major Markets 1", "Major Markets 2"]),
+        )
+
+    def test_parse_control_arg_boolean_and_number(self) -> None:
+        self.assertEqual(parse_control_arg("Include-Closed=true"), ("Include-Closed", True))
+        self.assertEqual(parse_control_arg("Min-ACV=50000"), ("Min-ACV", 50000))
+
+    def test_parse_control_arg_value_with_equals(self) -> None:
+        self.assertEqual(parse_control_arg("Where=a=b=c"), ("Where", "a=b=c"))
+
+    def test_parse_control_arg_rejects_missing_equals(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_control_arg("Sales-Team")
+
+    def test_parse_control_args_merges(self) -> None:
+        result = parse_control_args(
+            ["Sales-Team=Major Markets 1", "Include-Closed=true"]
+        )
+        self.assertEqual(
+            result, {"Sales-Team": "Major Markets 1", "Include-Closed": True}
+        )
 
 
 if __name__ == "__main__":

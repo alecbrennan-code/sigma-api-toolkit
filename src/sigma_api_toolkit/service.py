@@ -138,6 +138,7 @@ def build_send_request(
     format_type: str,
     selected_elements: Optional[Sequence[Dict]] = None,
     page_id: Optional[str] = None,
+    parameters: Optional[Dict[str, Any]] = None,
 ) -> Dict:
     if page_id and selected_elements:
         raise ValueError("page_id cannot be combined with selected elements")
@@ -178,6 +179,14 @@ def build_send_request(
             ),
         }
     ]
+    if parameters:
+        existing = request.get("parameters")
+        if isinstance(existing, dict):
+            merged = dict(existing)
+            merged.update(parameters)
+            request["parameters"] = merged
+        else:
+            request["parameters"] = dict(parameters)
     return request
 
 

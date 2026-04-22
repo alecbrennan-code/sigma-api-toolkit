@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Sequence
+from typing import Dict, Optional, Sequence
 
 from sigma_api_toolkit.client import (
     CHUNKABLE_FORMATS,
@@ -21,8 +21,11 @@ from sigma_api_toolkit.service import (
 )
 from sigma_api_toolkit.utils import (
     default_output_path,
+    load_controls_file,
+    parse_control_args,
     parse_workbook_locator,
     slugify,
+    summarize_controls,
     summarize_elements,
 )
 
@@ -38,6 +41,21 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("test-auth", help="Validate Sigma API authentication")
+
+    list_controls_parser = subparsers.add_parser(
+        "list-controls",
+        help=(
+            "List every workbook control (filter / parameter) with its name and "
+            "valueType. Use the name with --control NAME=VALUE on export-data "
+            "or send-export to apply a filter at export time."
+        ),
+    )
+    list_controls_parser.add_argument(
+        "--workbook", required=True, help="Workbook ID or Sigma workbook URL"
+    )
+    list_controls_parser.add_argument(
+        "--json", action="store_true", help="Emit JSON instead of text"
+    )
 
     inspect_parser = subparsers.add_parser(
         "inspect-workbook",
@@ -92,6 +110,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export_parser.add_argument("--poll-seconds", type=float, default=2.0)
     export_parser.add_argument("--timeout-seconds", type=float, default=300.0)
+    export_parser.add_argument(
+        "--control",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help=(
+            "Apply a workbook control (filter) value to this export. Repeat for "
+            "multiple controls. Values starting with [ { \" or looking numeric/"
+            "boolean are parsed as JSON, so text-list controls can take arrays "
+            "like '[\"Major Markets 1\"]'. Use sigma-toolkit list-controls to "
+            "discover valid control names."
+        ),
+    )
+    export_parser.add_argument(
+        "--controls-file",
+        default=None,
+        help=(
+            "Path to a JSON object mapping control name to value. Merged with "
+            "any --control NAME=VALUE flags, with --control taking precedence."
+        ),
+    )
+    export_parser.add_argument(
+        "--print-request",
+        action="store_true",
+        help="Print the resolved control parameters before exporting (does not send).",
+    )
 
     send_parser = subparsers.add_parser(
         "send-export",
@@ -120,6 +164,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print the fully built Sigma /send request body instead of sending it.",
     )
     send_parser.add_argument("--json", action="store_true", help="Emit the Sigma response as JSON")
+    send_parser.add_argument(
+        "--control",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help=(
+            "Apply a workbook control value to the send export. Repeat for "
+            "multiple controls. Same parsing rules as export-data --control."
+        ),
+    )
+    send_parser.add_argument(
+        "--controls-file",
+        default=None,
+        help=(
+            "Path to a JSON object mapping control name to value. Merged with "
+            "any --control flags."
+        ),
+    )
 
     return parser
 
@@ -137,6 +199,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Auth succeeded. Access token received (length={len(token)}).")
             return 0
 
+        if args.command == "list-controls":
+            return _run_list_controls(client, args)
+
         if args.command == "inspect-workbook":
             return _run_inspect(client, args)
 
@@ -151,6 +216,35 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     parser.print_help()
     return 1
+
+
+def _run_list_controls(client: SigmaAPIClient, args: argparse.Namespace) -> int:
+    workbook_id, _ = parse_workbook_locator(args.workbook)
+    controls = client.list_workbook_controls(workbook_id)
+    if args.json:
+        print(json.dumps({"entries": controls}, indent=2))
+        return 0
+    print(f"Workbook ID: {workbook_id}")
+    print(f"Controls: {len(controls)}")
+    for line in summarize_controls(controls):
+        print(line)
+    print()
+    print(
+        "Note: Sigma exposes control names and value types, but not the currently-"
+        "selected value. Pass control values into an export with --control NAME=VALUE."
+    )
+    return 0
+
+
+def _collect_control_parameters(
+    control_args: Sequence[str],
+    controls_file: Optional[str],
+) -> Dict[str, object]:
+    merged: Dict[str, object] = {}
+    if controls_file:
+        merged.update(load_controls_file(controls_file))
+    merged.update(parse_control_args(control_args))
+    return merged
 
 
 def _run_inspect(client: SigmaAPIClient, args: argparse.Namespace) -> int:
@@ -213,6 +307,16 @@ def _run_export(client: SigmaAPIClient, args: argparse.Namespace) -> int:
     if not args.disable_chunking and format_type in CHUNKABLE_FORMATS:
         chunk_size = min(args.chunk_size, MAX_EXPORT_ROWS)
 
+    parameters = _collect_control_parameters(args.control, args.controls_file)
+    if parameters:
+        print(
+            "Applying control parameters: "
+            + json.dumps(parameters, sort_keys=True)
+        )
+    if getattr(args, "print_request", False):
+        print(json.dumps({"parameters": parameters}, indent=2, sort_keys=True))
+        return 0
+
     if page_id and format_type in {"pdf", "png", "xlsx"}:
         workbook = client.get_workbook(workbook_id)
         output_file = Path(args.output_file) if args.output_file else Path(args.output_dir) / (
@@ -231,6 +335,7 @@ def _run_export(client: SigmaAPIClient, args: argparse.Namespace) -> int:
             csv_overlap_rows=args.chunk_overlap_rows if format_type == "csv" else 0,
             tag_name=args.tag_name,
             bookmark_id=args.bookmark_id,
+            parameters=parameters or None,
         )
         print(f"Wrote {bytes_written} bytes to {output_file}")
         return 0
@@ -272,6 +377,7 @@ def _run_export(client: SigmaAPIClient, args: argparse.Namespace) -> int:
             csv_overlap_rows=args.chunk_overlap_rows if format_type == "csv" else 0,
             tag_name=args.tag_name,
             bookmark_id=args.bookmark_id,
+            parameters=parameters or None,
         )
         print(f"Wrote {bytes_written} bytes to {output_path} ({element_name})")
 
@@ -289,12 +395,14 @@ def _run_send_export(client: SigmaAPIClient, args: argparse.Namespace) -> int:
         raise ValueError("--page-id cannot be combined with element selection")
 
     request_body = _load_json_file(args.request_file)
+    parameters = _collect_control_parameters(args.control, args.controls_file)
 
     if page_id:
         built_request = build_send_request(
             request_body,
             format_type=format_type,
             page_id=page_id,
+            parameters=parameters or None,
         )
     else:
         snapshot = inspect_workbook(
@@ -313,6 +421,7 @@ def _run_send_export(client: SigmaAPIClient, args: argparse.Namespace) -> int:
             request_body,
             format_type=format_type,
             selected_elements=selected,
+            parameters=parameters or None,
         )
 
     if args.dry_run:

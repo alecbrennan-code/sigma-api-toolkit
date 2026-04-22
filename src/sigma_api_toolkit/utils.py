@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
-from typing import Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
 WORKBOOK_URL_RE = re.compile(r"/workbook/([^/?#]+)")
@@ -82,3 +83,71 @@ def _extract_node_id(value: str) -> Optional[str]:
     if not match:
         return None
     return match.group(1)
+
+
+def parse_control_arg(raw: str) -> Tuple[str, Any]:
+    """Parse a CLI --control NAME=VALUE string into (name, parsed_value).
+
+    VALUE is parsed as JSON if it looks like JSON (begins with [ { " true false
+    null or a digit/minus). Otherwise it is returned as a plain string. This
+    lets callers pass JSON arrays for text-list controls while keeping simple
+    scalar values ergonomic:
+
+        --control Sales-Team="Major Markets 1"
+        --control Sales-Team='["Major Markets 1","Major Markets 2"]'
+        --control Include-Closed=true
+        --control Min-ACV=50000
+    """
+    if "=" not in raw:
+        raise ValueError(
+            f"--control expects NAME=VALUE, got {raw!r}. Example: "
+            "--control Sales-Team='Major Markets 1'"
+        )
+    name, value = raw.split("=", 1)
+    name = name.strip()
+    if not name:
+        raise ValueError(f"--control is missing a name before '=': {raw!r}")
+    stripped = value.strip()
+    if not stripped:
+        return name, ""
+    first_char = stripped[0]
+    if first_char in "[{\"" or stripped in {"true", "false", "null"} or _looks_numeric(stripped):
+        try:
+            return name, json.loads(stripped)
+        except json.JSONDecodeError:
+            return name, value
+    return name, value
+
+
+def parse_control_args(raw_values: Optional[Iterable[str]]) -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+    for raw in raw_values or []:
+        name, value = parse_control_arg(raw)
+        result[name] = value
+    return result
+
+
+def load_controls_file(path: str) -> Dict[str, Any]:
+    data = json.loads(Path(path).read_text())
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"--controls-file must contain a JSON object mapping control name to value. "
+            f"Got {type(data).__name__} at {path}."
+        )
+    return data
+
+
+def summarize_controls(controls: Sequence[Mapping[str, object]]) -> List[str]:
+    lines = []
+    for control in controls:
+        lines.append(
+            f"- {control.get('name', 'unknown')} | {control.get('valueType', 'unknown')}"
+        )
+    return lines
+
+
+_NUMERIC_RE = re.compile(r"^-?\d+(\.\d+)?([eE][+-]?\d+)?$")
+
+
+def _looks_numeric(value: str) -> bool:
+    return bool(_NUMERIC_RE.match(value))

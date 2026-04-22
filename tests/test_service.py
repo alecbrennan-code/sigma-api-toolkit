@@ -93,6 +93,30 @@ class ServiceTest(unittest.TestCase):
                 selected_elements=[self.elements[0]],
             )
 
+    def test_build_send_request_injects_control_parameters(self) -> None:
+        request = build_send_request(
+            {"targets": [{"type": "webhook", "webhookUrl": "https://example.com/hook"}]},
+            format_type="csv",
+            selected_elements=[self.elements[0]],
+            parameters={"Sales-Team": ["Major Markets 1"]},
+        )
+        self.assertEqual(request["parameters"], {"Sales-Team": ["Major Markets 1"]})
+
+    def test_build_send_request_merges_with_preexisting_parameters(self) -> None:
+        request = build_send_request(
+            {
+                "targets": [{"type": "webhook", "webhookUrl": "https://example.com/hook"}],
+                "parameters": {"Region": "NA"},
+            },
+            format_type="csv",
+            selected_elements=[self.elements[0]],
+            parameters={"Sales-Team": ["Major Markets 1"]},
+        )
+        self.assertEqual(
+            request["parameters"],
+            {"Region": "NA", "Sales-Team": ["Major Markets 1"]},
+        )
+
 
 class FakeSigmaClient:
     def __init__(self, pages, elements) -> None:
