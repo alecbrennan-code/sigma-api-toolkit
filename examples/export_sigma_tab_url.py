@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sigma_api_toolkit.client import SigmaAPIClient, _strip_first_line
+from sigma_api_toolkit.client import MAX_RESULTS_VALIDITY_TIME_MS, SigmaAPIClient, _strip_first_line
 from sigma_api_toolkit.config import SigmaConfig
 from sigma_api_toolkit.service import (
     inspect_workbook,
@@ -29,6 +29,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-file", required=True, help="Output CSV path")
     parser.add_argument("--chunk-size", type=int, default=1_000_000)
     parser.add_argument(
+        "--chunk-overlap-rows",
+        type=int,
+        default=1_000,
+        help="Rows of CSV overlap to validate between chunk requests. Default: 1000",
+    )
+    parser.add_argument(
         "--request-timeout-seconds",
         type=float,
         default=300.0,
@@ -36,6 +42,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--poll-seconds", type=float, default=5.0)
     parser.add_argument("--timeout-seconds", type=float, default=3600.0)
+    parser.add_argument(
+        "--results-validity-time-ms",
+        type=int,
+        default=MAX_RESULTS_VALIDITY_TIME_MS,
+        help=f"How long Sigma keeps each chunk downloadable. Default: {MAX_RESULTS_VALIDITY_TIME_MS}",
+    )
     parser.add_argument(
         "--resume-offset",
         type=int,
@@ -111,7 +123,9 @@ def main() -> int:
     log(f"output_path={output_path}")
     log(
         f"workbook_id={workbook_id} node_id={node_id} page_id={page_id} "
-        f"element_id={element_id} resume_offset={args.resume_offset}"
+        f"element_id={element_id} resume_offset={args.resume_offset} "
+        f"chunk_overlap_rows={args.chunk_overlap_rows} "
+        f"results_validity_time_ms={args.results_validity_time_ms}"
     )
 
     snapshot = inspect_workbook(client, workbook_id, page_id=page_id)
@@ -137,6 +151,8 @@ def main() -> int:
             start_offset=args.resume_offset,
             poll_seconds=args.poll_seconds,
             timeout_seconds=args.timeout_seconds,
+            results_validity_time_ms=args.results_validity_time_ms,
+            csv_overlap_rows=args.chunk_overlap_rows,
         ):
             chunk_count += 1
             is_first_write = chunk_count == 1 and args.resume_offset is None
@@ -171,6 +187,8 @@ def main() -> int:
             "duration_seconds": round(
                 (datetime.now(timezone.utc) - start_dt).total_seconds(), 2
             ),
+            "chunk_overlap_rows": args.chunk_overlap_rows,
+            "results_validity_time_ms": args.results_validity_time_ms,
             "chunk_count": chunk_count,
             "total_bytes": total_bytes,
             "chunk_stats": chunk_stats,
@@ -189,6 +207,8 @@ def main() -> int:
             "duration_seconds": round(
                 (datetime.now(timezone.utc) - start_dt).total_seconds(), 2
             ),
+            "chunk_overlap_rows": args.chunk_overlap_rows,
+            "results_validity_time_ms": args.results_validity_time_ms,
             "chunk_count": chunk_count,
             "total_bytes": total_bytes,
             "chunk_stats": chunk_stats,

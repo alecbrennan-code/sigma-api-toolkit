@@ -1,0 +1,14 @@
+{
+  "targets": [
+    {
+      "type": "workbook-cloud-export",
+      "workbookCloudExport": {
+        "connectionType": "snowflake",
+        "authorization": "YOUR_STORAGE_AUTHORIZATION",
+        "uri": "s3://YOUR_BUCKET/sigma/account-scoring.csv",
+        "exportFormat": "csv",
+        "timestampedUri": null
+      }
+    }
+  ]
+}

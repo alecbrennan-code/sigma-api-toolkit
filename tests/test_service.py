@@ -1,6 +1,7 @@
 import unittest
 
 from sigma_api_toolkit.service import (
+    build_send_request,
     exportable_elements,
     pick_elements_for_export,
     resolve_workbook_node_selection,
@@ -44,6 +45,53 @@ class ServiceTest(unittest.TestCase):
         )
         resolved = resolve_workbook_node_selection(client, "workbook_1", "pivot_1")
         self.assertEqual(resolved, {"page_id": None, "element_id": "pivot_1"})
+
+    def test_build_send_request_for_single_element(self) -> None:
+        request = build_send_request(
+            {"targets": [{"type": "webhook", "webhookUrl": "https://example.com/hook"}]},
+            format_type="csv",
+            selected_elements=[self.elements[0]],
+        )
+        self.assertEqual(request["attachments"][0]["formatOptions"]["type"], "CSV")
+        self.assertEqual(
+            request["attachments"][0]["source"],
+            {"type": "element", "elementId": "table_1"},
+        )
+
+    def test_build_send_request_for_multiple_elements(self) -> None:
+        request = build_send_request(
+            {"targets": [{"type": "webhook", "webhookUrl": "https://example.com/hook"}]},
+            format_type="json",
+            selected_elements=[self.elements[0], self.elements[2]],
+        )
+        self.assertEqual(request["attachments"][0]["formatOptions"]["type"], "JSON")
+        self.assertEqual(
+            request["attachments"][0]["source"],
+            {"type": "element", "nodeIds": ["table_1", "pivot_1"]},
+        )
+
+    def test_build_send_request_for_page(self) -> None:
+        request = build_send_request(
+            [{"type": "webhook", "webhookUrl": "https://example.com/hook"}],
+            format_type="xlsx",
+            page_id="page_1",
+        )
+        self.assertEqual(request["attachments"][0]["formatOptions"]["type"], "EXCEL")
+        self.assertEqual(
+            request["attachments"][0]["source"],
+            {"type": "page", "pageId": "page_1"},
+        )
+
+    def test_build_send_request_rejects_existing_attachments(self) -> None:
+        with self.assertRaises(ValueError):
+            build_send_request(
+                {
+                    "targets": [{"type": "webhook", "webhookUrl": "https://example.com/hook"}],
+                    "attachments": [],
+                },
+                format_type="csv",
+                selected_elements=[self.elements[0]],
+            )
 
 
 class FakeSigmaClient:

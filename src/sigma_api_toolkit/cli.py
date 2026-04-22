@@ -5,9 +5,16 @@ import json
 from pathlib import Path
 from typing import Sequence
 
-from sigma_api_toolkit.client import CHUNKABLE_FORMATS, MAX_EXPORT_ROWS, SigmaAPIClient, SigmaAPIError
+from sigma_api_toolkit.client import (
+    CHUNKABLE_FORMATS,
+    MAX_EXPORT_ROWS,
+    MAX_RESULTS_VALIDITY_TIME_MS,
+    SigmaAPIClient,
+    SigmaAPIError,
+)
 from sigma_api_toolkit.config import SigmaConfig
 from sigma_api_toolkit.service import (
+    build_send_request,
     inspect_workbook,
     pick_elements_for_export,
     resolve_workbook_node_selection,
@@ -61,13 +68,58 @@ def build_parser() -> argparse.ArgumentParser:
         default=250_000,
         help=f"Chunk size for CSV/JSON/XLSX exports. Max {MAX_EXPORT_ROWS}.",
     )
+    export_parser.add_argument(
+        "--chunk-overlap-rows",
+        type=int,
+        default=1_000,
+        help=(
+            "For chunked CSV exports, re-request this many trailing rows from the prior chunk "
+            "and verify the boundary matches exactly. Default: 1000."
+        ),
+    )
     export_parser.add_argument("--disable-chunking", action="store_true")
     export_parser.add_argument("--overwrite", action="store_true")
     export_parser.add_argument("--tag-name")
     export_parser.add_argument("--bookmark-id")
-    export_parser.add_argument("--results-validity-time-ms", type=int, default=None)
+    export_parser.add_argument(
+        "--results-validity-time-ms",
+        type=int,
+        default=MAX_RESULTS_VALIDITY_TIME_MS,
+        help=(
+            "How long Sigma should keep the exported file downloadable. "
+            f"Default: {MAX_RESULTS_VALIDITY_TIME_MS} (6 hours)."
+        ),
+    )
     export_parser.add_argument("--poll-seconds", type=float, default=2.0)
     export_parser.add_argument("--timeout-seconds", type=float, default=300.0)
+
+    send_parser = subparsers.add_parser(
+        "send-export",
+        help=(
+            "Use Sigma's /send export flow to deliver a workbook/page/element export to "
+            "a destination such as cloud storage, Google Drive, Slack, or a webhook"
+        ),
+    )
+    send_parser.add_argument("--workbook", required=True, help="Workbook ID or Sigma workbook URL")
+    send_parser.add_argument("--element-id")
+    send_parser.add_argument("--element-name")
+    send_parser.add_argument("--page-id")
+    send_parser.add_argument("--all-elements", action="store_true")
+    send_parser.add_argument("--format", default="csv", help="Attachment format. Default: csv")
+    send_parser.add_argument(
+        "--request-file",
+        required=True,
+        help=(
+            "Path to a JSON file containing the Sigma /send target config. "
+            "The toolkit will inject attachments based on the workbook/page/element selection."
+        ),
+    )
+    send_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the fully built Sigma /send request body instead of sending it.",
+    )
+    send_parser.add_argument("--json", action="store_true", help="Emit the Sigma response as JSON")
 
     return parser
 
@@ -90,6 +142,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command == "export-data":
             return _run_export(client, args)
+
+        if args.command == "send-export":
+            return _run_send_export(client, args)
     except (EnvironmentError, SigmaAPIError, TimeoutError, ValueError, FileExistsError) as exc:
         print(f"Error: {exc}")
         return 1
@@ -173,6 +228,7 @@ def _run_export(client: SigmaAPIClient, args: argparse.Namespace) -> int:
             poll_seconds=args.poll_seconds,
             timeout_seconds=args.timeout_seconds,
             results_validity_time_ms=args.results_validity_time_ms,
+            csv_overlap_rows=args.chunk_overlap_rows if format_type == "csv" else 0,
             tag_name=args.tag_name,
             bookmark_id=args.bookmark_id,
         )
@@ -213,9 +269,70 @@ def _run_export(client: SigmaAPIClient, args: argparse.Namespace) -> int:
             poll_seconds=args.poll_seconds,
             timeout_seconds=args.timeout_seconds,
             results_validity_time_ms=args.results_validity_time_ms,
+            csv_overlap_rows=args.chunk_overlap_rows if format_type == "csv" else 0,
             tag_name=args.tag_name,
             bookmark_id=args.bookmark_id,
         )
         print(f"Wrote {bytes_written} bytes to {output_path} ({element_name})")
 
     return 0
+
+
+def _run_send_export(client: SigmaAPIClient, args: argparse.Namespace) -> int:
+    workbook_id, inferred_node_id = parse_workbook_locator(args.workbook)
+    resolved = resolve_workbook_node_selection(client, workbook_id, inferred_node_id)
+    page_id = args.page_id or resolved["page_id"]
+    resolved_element_id = resolved["element_id"]
+    format_type = args.format.lower()
+
+    if page_id and (args.element_id or args.element_name or resolved_element_id):
+        raise ValueError("--page-id cannot be combined with element selection")
+
+    request_body = _load_json_file(args.request_file)
+
+    if page_id:
+        built_request = build_send_request(
+            request_body,
+            format_type=format_type,
+            page_id=page_id,
+        )
+    else:
+        snapshot = inspect_workbook(
+            client,
+            workbook_id,
+            page_id=None,
+            include_columns=False,
+        )
+        selected = pick_elements_for_export(
+            snapshot["elements"],
+            element_id=args.element_id or resolved_element_id,
+            element_name=args.element_name,
+            all_elements=args.all_elements,
+        )
+        built_request = build_send_request(
+            request_body,
+            format_type=format_type,
+            selected_elements=selected,
+        )
+
+    if args.dry_run:
+        print(json.dumps(built_request, indent=2))
+        return 0
+
+    response = client.send_export(workbook_id, request_body=built_request)
+    if args.json:
+        print(json.dumps(response, indent=2))
+        return 0
+
+    target_count = len(built_request.get("targets", []))
+    attachment_count = len(built_request.get("attachments", []))
+    print(
+        "Triggered Sigma send export "
+        f"for workbook {workbook_id} to {target_count} target(s) "
+        f"with {attachment_count} attachment(s)."
+    )
+    return 0
+
+
+def _load_json_file(path: str) -> object:
+    return json.loads(Path(path).read_text())

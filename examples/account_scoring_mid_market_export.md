@@ -21,6 +21,7 @@ python3 examples/account_scoring_mid_market_export.py \
   --env-file .env \
   --output-file exports/account-scoring-query__mid-market.csv \
   --chunk-size 500000 \
+  --chunk-overlap-rows 1000 \
   --request-timeout-seconds 600 \
   --overwrite
 ```
@@ -39,5 +40,7 @@ These outputs are local only. `exports/` is gitignored and should not be committ
 
 - This example intentionally uses `csv` only.
 - The script pulls the `Custom SQL` element directly from the shared Sigma URL.
+- Chunked CSV pulls use overlap-aware boundary validation so the export fails loudly if Sigma reorders rows across chunk requests.
+- If the overlap check fails on this source, treat that as evidence that Sigma's direct `/export` pagination is unstable for this workbook and switch to `sigma-toolkit send-export` with a cloud-storage target instead of retrying blind.
 - If a long export is interrupted, you can resume with `--resume-offset <next_sigma_row_offset>`.
 - This is a reference export pattern, not a requirement that future workbook pulls use the same workbook shape.

@@ -16,9 +16,14 @@ Workbook ID or URL
      -> one element
      -> one page
      -> all exportable elements
-  -> POST /v2/workbooks/{workbookId}/export
-  -> poll GET /v2/query/{queryId}/download
-  -> write files locally
+  -> choose delivery mode
+     -> direct export
+        -> POST /v2/workbooks/{workbookId}/export
+        -> poll GET /v2/query/{queryId}/download
+        -> write files locally
+     -> send export
+        -> POST /v2/workbooks/{workbookId}/send
+        -> let Sigma deliver one export to the requested destination
 ```
 
 ## Module responsibilities
@@ -27,9 +32,9 @@ Workbook ID or URL
   - loads `SIGMA_API_URL`, `SIGMA_CLIENT_ID`, and `SIGMA_CLIENT_SECRET`
   - optionally loads `.env`
 - `client.py`
-  - owns HTTP behavior, authentication, pagination, polling, and file export
+  - owns HTTP behavior, authentication, direct export pagination, polling, file export, and `/send` delivery
 - `service.py`
-  - owns workbook inspection and element-selection rules
+  - owns workbook inspection, element-selection rules, and `/send` attachment shaping
 - `utils.py`
   - owns workbook URL parsing, filename sanitization, and display helpers
 - `cli.py`
@@ -60,6 +65,8 @@ That keeps the workflow deterministic without silently choosing the wrong table.
 - Workbook exports return a `queryId`, not file bytes directly.
 - Export downloads can require polling before the file is ready.
 - CSV/XLSX/JSON exports are capped at 1 million rows per request, so chunking via `rowLimit` and `offset` is required for larger results.
+- Sigma warns that the order is evaluated when each chunk request is made, so chunked CSV exports can overlap across requests. The toolkit mitigates that by re-requesting an overlap window and validating that the chunk boundaries match before appending rows locally.
+- Sigma also exposes a `/send` workflow that can deliver one export to a destination such as cloud storage, Google Drive, Slack, or a webhook. For large exact exports, this is the preferred path because it avoids client-side chunk stitching.
 
 ## Expected team workflow
 
@@ -76,3 +83,8 @@ For targeted pulls:
 sigma-toolkit export-data --workbook <id-or-url> --element-name "<table name>" --overwrite
 ```
 
+For stable large exports:
+
+```bash
+sigma-toolkit send-export --workbook <id-or-url> --request-file <targets.json> --dry-run
+```

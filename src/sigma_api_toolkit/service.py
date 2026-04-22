@@ -1,11 +1,18 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence
+from copy import deepcopy
+from typing import Any, Dict, List, Optional, Sequence
 
 from sigma_api_toolkit.client import SigmaAPIClient
 
 
 EXPORTABLE_TYPES = {"table", "pivot", "pivotTable", "inputTable"}
+SEND_ATTACHMENT_FORMATS = {
+    "csv": "CSV",
+    "json": "JSON",
+    "jsonl": "JSONL",
+    "xlsx": "EXCEL",
+}
 
 
 def inspect_workbook(
@@ -123,3 +130,74 @@ def pick_elements_for_export(
         "Workbook has multiple exportable elements. Re-run with --element-id, "
         "--element-name, or --all-elements."
     )
+
+
+def build_send_request(
+    base_request: Any,
+    *,
+    format_type: str,
+    selected_elements: Optional[Sequence[Dict]] = None,
+    page_id: Optional[str] = None,
+) -> Dict:
+    if page_id and selected_elements:
+        raise ValueError("page_id cannot be combined with selected elements")
+    if not page_id and not selected_elements:
+        raise ValueError("A send export request needs a page or at least one selected element")
+
+    if isinstance(base_request, list):
+        request: Dict[str, Any] = {"targets": deepcopy(base_request)}
+    elif isinstance(base_request, dict):
+        request = deepcopy(base_request)
+    else:
+        raise ValueError("Send request file must contain a JSON object or array")
+
+    if "attachments" in request:
+        raise ValueError(
+            "Send request file should not include attachments. The toolkit derives those "
+            "from --page-id / --element-id / --element-name / --all-elements."
+        )
+
+    targets = request.get("targets")
+    if not isinstance(targets, list) or not targets:
+        raise ValueError("Send request file must define a non-empty targets array")
+
+    attachment_format = SEND_ATTACHMENT_FORMATS.get(format_type.lower())
+    if attachment_format is None:
+        supported = ", ".join(sorted(SEND_ATTACHMENT_FORMATS))
+        raise ValueError(
+            f"send-export currently supports these formats: {supported}. "
+            f"Received: {format_type}"
+        )
+
+    request["attachments"] = [
+        {
+            "formatOptions": {"type": attachment_format},
+            "source": build_send_attachment_source(
+                selected_elements=selected_elements,
+                page_id=page_id,
+            ),
+        }
+    ]
+    return request
+
+
+def build_send_attachment_source(
+    *,
+    selected_elements: Optional[Sequence[Dict]] = None,
+    page_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    if page_id:
+        return {"type": "page", "pageId": page_id}
+
+    selected_elements = selected_elements or []
+    if not selected_elements:
+        raise ValueError("Expected at least one selected element for a send export")
+
+    element_ids = [str(element.get("elementId")) for element in selected_elements if element.get("elementId")]
+    if not element_ids:
+        raise ValueError("Selected elements did not include any elementId values")
+
+    if len(element_ids) == 1:
+        return {"type": "element", "elementId": element_ids[0]}
+
+    return {"type": "element", "nodeIds": element_ids}
