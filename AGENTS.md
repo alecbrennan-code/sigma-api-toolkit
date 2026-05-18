@@ -31,6 +31,29 @@ Instructions in this file apply to all work in this repository. They are intenti
 - The example script `examples/account_scoring_mid_market_export.py` supports `--resume-offset <sigma_row>`. On resume, the script reads the tail of the existing CSV, backs up the Sigma offset by `--chunk-overlap-rows`, and has `iter_export_chunks` byte-validate that the resumed rows connect cleanly to what's already on disk. If the validation fails, the export stops instead of corrupting the file.
 - Both the account-scoring script and any new pulls should prefer passing `--expected-rows N` when the source row count is known. The script counts data records in the completed CSV and fails on mismatch. Use the same pattern in new scripts by importing `count_csv_data_records` from `sigma_api_toolkit.client`.
 
+## Dashboard health-check playbook
+
+When a user gives you a Sigma URL and asks whether the dashboard is online / working / pulling correctly, do not try to manually inspect every element, and do not blindly scan every page — most workbooks have many hidden / scratch tabs the user does not want spot-checked.
+
+The full skill recipe lives at `.claude/skills/dashboard-healthcheck/SKILL.md`. Read it before running anything. The two-phase shape:
+
+```
+# Phase 1: preflight + tab list (cheap, confirms access)
+sigma-toolkit list-pages --workbook "<url>" --json
+
+# Phase 2: scoped health check, only the tabs the user picked
+sigma-toolkit health-check --workbook "<url>" \
+  --page-id <page_id_1> --page-id <page_id_2> \
+  --output-json exports/healthcheck.json \
+  --output-markdown exports/healthcheck.md
+```
+
+Always do Phase 1 first and have the user pick which tabs to spot-check (by index in a numbered list — the harness's multi-select picker maxes out at 4 options, which is too few for most workbooks). An explicit `--page-id` selection overrides the default skip-hidden behaviour.
+
+Hard limits to communicate honestly when reporting back:
+- The health check cannot see currently-applied filter values — see the next section.
+- The health check does not compare values against a source-of-truth (Snowflake / Redshift). That's a future extension. Don't claim correctness, only connectivity and shape.
+
 ## Filtered-export playbook
 
 Follow this flow whenever a user gives you a Sigma workbook URL and asks for data filtered by a control value. It works identically under Claude Code, Codex, or any other agent because the only primitives are the `sigma-toolkit` CLI and the user's `.env`.

@@ -13,6 +13,19 @@ from sigma_api_toolkit.client import (
     SigmaAPIError,
 )
 from sigma_api_toolkit.config import SigmaConfig
+from sigma_api_toolkit.healthcheck import (
+    DEFAULT_CELL_MAX_WIDTH,
+    DEFAULT_HIGH_NULL_THRESHOLD,
+    DEFAULT_MAX_FLAGGED_ROWS,
+    DEFAULT_PREVIEW_ROWS,
+    DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    DEFAULT_ROW_MOSTLY_NULL_THRESHOLD,
+    DEFAULT_SAMPLE_ROWS,
+    health_check_workbook,
+    list_workbook_page_summary,
+    report_to_dict,
+    report_to_markdown,
+)
 from sigma_api_toolkit.service import (
     build_send_request,
     inspect_workbook,
@@ -137,6 +150,134 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print the resolved control parameters before exporting (does not send).",
     )
 
+    list_pages_parser = subparsers.add_parser(
+        "list-pages",
+        help=(
+            "Preflight a workbook: confirm access and list every page with its "
+            "hidden flag (when Sigma exposes one). Used by the dashboard-"
+            "healthcheck skill to let the user pick which tabs to spot-check."
+        ),
+    )
+    list_pages_parser.add_argument(
+        "--workbook", required=True, help="Workbook ID or Sigma workbook URL"
+    )
+    list_pages_parser.add_argument(
+        "--json", action="store_true", help="Emit JSON instead of text"
+    )
+
+    health_parser = subparsers.add_parser(
+        "health-check",
+        help=(
+            "Spot-check a Sigma workbook end-to-end: walk visible pages, "
+            "sample each exportable element under the dashboard's saved default "
+            "filters, and report failed exports, empty elements, or columns "
+            "that are unexpectedly null. Sigma's API does not expose currently-"
+            "applied filter values, so the run reflects the workbook's published defaults."
+        ),
+    )
+    health_parser.add_argument(
+        "--workbook", required=True, help="Workbook ID or Sigma workbook URL"
+    )
+    health_parser.add_argument(
+        "--sample-rows",
+        type=int,
+        default=DEFAULT_SAMPLE_ROWS,
+        help=f"Rows to sample per element. Default: {DEFAULT_SAMPLE_ROWS}.",
+    )
+    health_parser.add_argument(
+        "--include-hidden-pages",
+        action="store_true",
+        help="Check hidden pages too (only meaningful if Sigma exposed a hidden flag).",
+    )
+    health_parser.add_argument(
+        "--page-id",
+        action="append",
+        default=[],
+        dest="page_ids",
+        metavar="PAGE_ID",
+        help=(
+            "Scope the check to specific page(s). Repeatable. When provided, "
+            "only these pages are sampled and the --include-hidden-pages flag "
+            "is ignored (an explicit selection wins). Use sigma-toolkit "
+            "list-pages to discover page IDs."
+        ),
+    )
+    health_parser.add_argument(
+        "--high-null-threshold",
+        type=float,
+        default=DEFAULT_HIGH_NULL_THRESHOLD,
+        help=(
+            "Per-column null fraction at or above which a column is flagged "
+            f"(but not as fully-null). Default: {DEFAULT_HIGH_NULL_THRESHOLD}."
+        ),
+    )
+    health_parser.add_argument(
+        "--request-timeout-seconds",
+        type=float,
+        default=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        help=(
+            "Per-element export download timeout. Default: "
+            f"{DEFAULT_REQUEST_TIMEOUT_SECONDS}."
+        ),
+    )
+    health_parser.add_argument(
+        "--preview-rows",
+        type=int,
+        default=DEFAULT_PREVIEW_ROWS,
+        help=(
+            "Number of head rows to capture per element for semantic review. "
+            f"Default: {DEFAULT_PREVIEW_ROWS}. Set to 0 to skip."
+        ),
+    )
+    health_parser.add_argument(
+        "--max-flagged-rows",
+        type=int,
+        default=DEFAULT_MAX_FLAGGED_ROWS,
+        help=(
+            "Maximum number of suspicious rows (error tokens or mostly-null) "
+            f"to surface per element. Default: {DEFAULT_MAX_FLAGGED_ROWS}. "
+            "Set to 0 to skip flagged-row extraction."
+        ),
+    )
+    health_parser.add_argument(
+        "--row-mostly-null-threshold",
+        type=float,
+        default=DEFAULT_ROW_MOSTLY_NULL_THRESHOLD,
+        help=(
+            "Row-level null fraction at or above which a row is flagged. "
+            f"Default: {DEFAULT_ROW_MOSTLY_NULL_THRESHOLD}."
+        ),
+    )
+    health_parser.add_argument(
+        "--cell-max-width",
+        type=int,
+        default=DEFAULT_CELL_MAX_WIDTH,
+        help=(
+            "Maximum cell width (chars) in preview / flagged-row output. "
+            f"Default: {DEFAULT_CELL_MAX_WIDTH}. Set to 0 to disable truncation."
+        ),
+    )
+    health_parser.add_argument(
+        "--output-json",
+        default=None,
+        help="Write the structured JSON report to this path.",
+    )
+    health_parser.add_argument(
+        "--output-markdown",
+        default=None,
+        help="Write the markdown digest to this path.",
+    )
+    health_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Also print the structured JSON report to stdout after the markdown digest.",
+    )
+    health_parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress per-element progress lines.",
+    )
+
     send_parser = subparsers.add_parser(
         "send-export",
         help=(
@@ -202,6 +343,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "list-controls":
             return _run_list_controls(client, args)
 
+        if args.command == "list-pages":
+            return _run_list_pages(client, args)
+
         if args.command == "inspect-workbook":
             return _run_inspect(client, args)
 
@@ -210,6 +354,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command == "send-export":
             return _run_send_export(client, args)
+
+        if args.command == "health-check":
+            return _run_health_check(client, args)
     except (EnvironmentError, SigmaAPIError, TimeoutError, ValueError, FileExistsError) as exc:
         print(f"Error: {exc}")
         return 1
@@ -441,6 +588,86 @@ def _run_send_export(client: SigmaAPIClient, args: argparse.Namespace) -> int:
         f"with {attachment_count} attachment(s)."
     )
     return 0
+
+
+def _run_list_pages(client: SigmaAPIClient, args: argparse.Namespace) -> int:
+    workbook_id, _ = parse_workbook_locator(args.workbook)
+    summary = list_workbook_page_summary(client, workbook_id)
+    if args.json:
+        print(json.dumps(summary, indent=2))
+        return 0
+
+    wb = summary["workbook"]
+    pages = summary["pages"]
+    print(f"Workbook ID: {wb['workbook_id']}")
+    print(f"Workbook name: {wb.get('name') or '—'}")
+    print(f"Workbook URL: {wb.get('url') or '—'}")
+    print(f"Pages: {len(pages)}")
+    if not summary["hidden_flag_exposed"]:
+        print(
+            "Note: Sigma /pages did not expose a hidden/visibility flag for "
+            "this workbook — every page is shown without a hidden marker."
+        )
+    for idx, page in enumerate(pages, start=1):
+        if page["hidden"] is True:
+            tag = "hidden "
+        elif page["hidden"] is False:
+            tag = "visible"
+        else:
+            tag = "       "
+        print(f"  {idx:>3}. [{tag}] {page['name']}  (page_id={page['page_id']})")
+    return 0
+
+
+def _run_health_check(client: SigmaAPIClient, args: argparse.Namespace) -> int:
+    from sys import stderr
+
+    workbook_id, _ = parse_workbook_locator(args.workbook)
+    if not args.quiet:
+        print(f"Running health check on workbook {workbook_id}...", file=stderr)
+
+    def progress(page_name: str, element_name: str) -> None:
+        if not args.quiet:
+            print(f"  - {page_name} -> {element_name}", file=stderr)
+
+    page_ids = args.page_ids or None
+    report = health_check_workbook(
+        client,
+        workbook_id,
+        sample_rows=args.sample_rows,
+        include_hidden_pages=args.include_hidden_pages,
+        page_ids=page_ids,
+        high_null_threshold=args.high_null_threshold,
+        request_timeout_seconds=args.request_timeout_seconds,
+        preview_rows=args.preview_rows,
+        max_flagged_rows=args.max_flagged_rows,
+        row_mostly_null_threshold=args.row_mostly_null_threshold,
+        cell_max_width=args.cell_max_width,
+        on_progress=progress,
+    )
+
+    payload = report_to_dict(report)
+    markdown = report_to_markdown(report)
+
+    if args.output_json:
+        out_path = Path(args.output_json)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(payload, indent=2))
+        if not args.quiet:
+            print(f"Wrote JSON report to {out_path}", file=stderr)
+    if args.output_markdown:
+        out_path = Path(args.output_markdown)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(markdown)
+        if not args.quiet:
+            print(f"Wrote markdown report to {out_path}", file=stderr)
+
+    print(markdown)
+    if args.json:
+        print()
+        print(json.dumps(payload, indent=2))
+
+    return 0 if report.overall_status != "fail" else 2
 
 
 def _load_json_file(path: str) -> object:

@@ -162,6 +162,43 @@ sigma-toolkit export-data \
 
 Run `sigma-toolkit list-controls --workbook "<url>"` first to discover valid control names and their value types.
 
+### 3b. Spot-check a dashboard end-to-end (health check)
+
+When a teammate sends a Sigma URL and asks "is this working?" or "does this dashboard look right?", run the two-phase flow.
+
+**Phase 1 — preflight + list tabs (cheap, confirms access):**
+
+```bash
+sigma-toolkit list-pages \
+  --workbook "https://app.sigmacomputing.com/flock-safety/workbook/..."
+```
+
+Pick which tabs to spot-check by their page IDs. The `--json` form is what the Claude Code skill consumes.
+
+**Phase 2 — scoped health check:**
+
+```bash
+sigma-toolkit health-check \
+  --workbook "https://app.sigmacomputing.com/flock-safety/workbook/..." \
+  --page-id <page_id_1> \
+  --page-id <page_id_2> \
+  --output-json exports/healthcheck.json \
+  --output-markdown exports/healthcheck.md
+```
+
+For each selected page, the command samples every exportable element (default 1000 rows) under the workbook's saved default filters and emits a status per element (`ok` / `warn` / `fail`). Useful adjustments:
+
+- `--sample-rows 5000` — bigger sample for higher-confidence null detection
+- `--high-null-threshold 0.8` — only flag columns at or above 80% null (default 50%)
+- `--include-hidden-pages` — when no `--page-id` is given, also check hidden pages (an explicit `--page-id` selection always wins)
+- `--json` / `--quiet` — JSON to stdout, suppress per-element progress
+
+Omit `--page-id` entirely to scan every non-hidden page (legacy behaviour). Exit codes: `0` if overall status is `ok` or `warn`, `2` if any element failed to export.
+
+**Filter caveat:** Sigma's API does not expose the currently-selected value of a workbook control, so the health check runs against the dashboard's published default filter state. To check a specific filter combination, use `sigma-toolkit export-data --control NAME=VALUE` instead.
+
+A Claude Code skill at `.claude/skills/dashboard-healthcheck/SKILL.md` wraps both phases for agent use — given a Sigma URL, it lists the tabs, asks which to check, and runs the scoped sample.
+
 ### 4. Export every exportable element from a workbook
 
 This is the most useful “workbook ID only” team workflow:
