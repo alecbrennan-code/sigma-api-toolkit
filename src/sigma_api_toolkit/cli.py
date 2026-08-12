@@ -12,6 +12,12 @@ from sigma_api_toolkit.client import (
     SigmaAPIClient,
     SigmaAPIError,
 )
+from sigma_api_toolkit.codesearch import (
+    diff_snapshots,
+    resolve_member_names,
+    search_workbooks,
+    snapshot_definition,
+)
 from sigma_api_toolkit.config import SigmaConfig
 from sigma_api_toolkit.healthcheck import (
     DEFAULT_CELL_MAX_WIDTH,
@@ -278,6 +284,72 @@ def build_parser() -> argparse.ArgumentParser:
         help="Suppress per-element progress lines.",
     )
 
+    search_parser = subparsers.add_parser(
+        "search-code",
+        help=(
+            "Search workbook definitions for a string or regex and report every "
+            "matching line with its workbook, node, and line number. Omit "
+            "--workbook to sweep the whole org. Note: Sigma's API exposes only "
+            "the CURRENT definition, never per-version history, so this answers "
+            "'where does this text live' — not 'who added it'."
+        ),
+    )
+    search_parser.add_argument(
+        "--pattern", required=True, help="Text (or regex with --regex) to search for"
+    )
+    search_parser.add_argument(
+        "--workbook",
+        action="append",
+        default=None,
+        help=(
+            "Workbook ID or Sigma URL. Repeatable. Omit to search every "
+            "workbook the API credentials can see."
+        ),
+    )
+    search_parser.add_argument(
+        "--regex", action="store_true", help="Treat --pattern as a regular expression"
+    )
+    search_parser.add_argument(
+        "--case-sensitive", action="store_true", help="Match case-sensitively"
+    )
+    search_parser.add_argument(
+        "--include-queries",
+        action="store_true",
+        help=(
+            "Also search Sigma's generated element SQL. Much slower and rarely "
+            "useful: generated SQL was never hand-typed, and its column aliases "
+            "change between calls."
+        ),
+    )
+    search_parser.add_argument("--json", action="store_true", help="Emit JSON")
+    search_parser.add_argument(
+        "--quiet", action="store_true", help="Suppress per-workbook progress lines"
+    )
+
+    snapshot_parser = subparsers.add_parser(
+        "snapshot-definition",
+        help=(
+            "Write a workbook's current custom SQL to a timestamped JSON file. "
+            "Run on a schedule and diff consecutive snapshots to bracket when a "
+            "change landed — the standing substitute for the version history "
+            "the API does not expose."
+        ),
+    )
+    snapshot_parser.add_argument(
+        "--workbook", required=True, help="Workbook ID or Sigma workbook URL"
+    )
+    snapshot_parser.add_argument(
+        "--out-dir",
+        default="snapshots",
+        help="Directory for snapshot files. Default: ./snapshots",
+    )
+    snapshot_parser.add_argument(
+        "--diff-against",
+        default=None,
+        help="Path to an earlier snapshot file to diff the new one against",
+    )
+    snapshot_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
     send_parser = subparsers.add_parser(
         "send-export",
         help=(
@@ -357,6 +429,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command == "health-check":
             return _run_health_check(client, args)
+
+        if args.command == "search-code":
+            return _run_search_code(client, args)
+
+        if args.command == "snapshot-definition":
+            return _run_snapshot_definition(client, args)
     except (EnvironmentError, SigmaAPIError, TimeoutError, ValueError, FileExistsError) as exc:
         print(f"Error: {exc}")
         return 1
@@ -668,6 +746,116 @@ def _run_health_check(client: SigmaAPIClient, args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2))
 
     return 0 if report.overall_status != "fail" else 2
+
+
+def _run_search_code(client: SigmaAPIClient, args: argparse.Namespace) -> int:
+    from sys import stderr
+
+    workbook_ids = None
+    if args.workbook:
+        workbook_ids = [parse_workbook_locator(value)[0] for value in args.workbook]
+
+    def progress(index: int, total: int, label: str) -> None:
+        if not args.quiet:
+            print(f"[{index}/{total}] {label}", file=stderr)
+
+    skipped = []
+    hits = search_workbooks(
+        client,
+        args.pattern,
+        workbook_url_ids=workbook_ids,
+        regex=args.regex,
+        ignore_case=not args.case_sensitive,
+        include_queries=args.include_queries,
+        on_progress=progress,
+        skipped_out=skipped,
+    )
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "hits": [hit.as_dict() for hit in hits],
+                    "skipped": skipped,
+                },
+                indent=2,
+            )
+        )
+        return 0 if hits else 1
+
+    if not hits:
+        print(f"No matches for {args.pattern!r}.")
+        if skipped:
+            print(
+                f"\nWARNING: {len(skipped)} workbook(s) could not be read, so this "
+                "is NOT a conclusive 'not present' result. Sigma returns a "
+                "permanent 400 on /lineage for roughly a third of workbooks."
+            )
+            for entry in skipped[:10]:
+                print(f"  - {entry}")
+            if len(skipped) > 10:
+                print(f"  ... and {len(skipped) - 10} more")
+        return 1
+
+    print(f"{len(hits)} match(es) for {args.pattern!r}:\n")
+    for hit in hits:
+        label = hit.workbook_name or hit.workbook_url_id
+        print(f"  {label} ({hit.workbook_url_id})")
+        element = f" [{hit.element_name}]" if hit.element_name else ""
+        print(f"    {hit.source} node {hit.node}{element} line {hit.line_no}")
+        print(f"      {hit.line}")
+    if skipped:
+        print(
+            f"\nWARNING: {len(skipped)} workbook(s) could not be read and were "
+            "skipped; there may be further matches in those."
+        )
+        for entry in skipped[:10]:
+            print(f"  - {entry}")
+        if len(skipped) > 10:
+            print(f"  ... and {len(skipped) - 10} more")
+    print(
+        "\nNote: this is the workbook's CURRENT definition. Sigma's API does not "
+        "expose per-version history, so it cannot tell you who added the line. "
+        "Use the workbook's Version History panel in the Sigma UI for that."
+    )
+    return 0
+
+
+def _run_snapshot_definition(client: SigmaAPIClient, args: argparse.Namespace) -> int:
+    workbook_id, _ = parse_workbook_locator(args.workbook)
+    path = snapshot_definition(client, workbook_id, Path(args.out_dir))
+    payload: Dict[str, object] = {"snapshot": str(path)}
+
+    if args.diff_against:
+        diff = diff_snapshots(Path(args.diff_against), path)
+        payload["diff"] = diff
+        snapshot = json.loads(path.read_text())
+        last_editor = snapshot.get("updated_by")
+        if last_editor:
+            # Only worth an extra API round-trip when there is something to attribute.
+            if any(diff[key] for key in ("added", "removed", "changed")):
+                members = resolve_member_names(client)
+                payload["last_editor"] = members.get(last_editor, last_editor)
+
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    print(f"Wrote snapshot to {path}")
+    if args.diff_against:
+        diff = payload["diff"]  # type: ignore[index]
+        for key in ("added", "removed", "changed"):
+            nodes = diff[key]  # type: ignore[index]
+            print(f"  {key}: {len(nodes)}")
+            for node in nodes:
+                print(f"    - {node}")
+        if "last_editor" in payload:
+            print(f"\n  Workbook last edited by: {payload['last_editor']}")
+            print(
+                "  (last editor as of this snapshot — attribution is only as "
+                "precise as the snapshot cadence)"
+            )
+    return 0
 
 
 def _load_json_file(path: str) -> object:
